@@ -11,6 +11,8 @@ const execPromise = util.promisify(exec);
 import { ChatGPTAutomationController, extractChatGPTCookies } from './chatgpt_service.js';
 import { QwenAutomationController, extractQwenCookies } from './qwen_service.js';
 import { agenticTools } from './agentic_tools.js';
+import { Orchestrator, PROJECTS_ROOT } from './orchestrator.js';
+import { ollama } from './ollama_service.js';
 
 const app = express();
 app.use(cors());
@@ -649,6 +651,93 @@ ${prompt}`;
         });
       }
 
+      // === PROJECT MODE: multi-file generation via local orchestrator + workers ===
+      // Distinct from single-file vibe_code. The local qwen2.5-coder:7b orchestrator
+      // plans the file tree, then per-file prompts go to either the local model
+      // (fast, free) or ChatGPT/Qwen via web automation (when workerProvider set).
+      if (msg.type === 'BUILD_PROJECT') {
+        const { prompt, workerProvider = 'local' } = msg;
+        const originSessionId = msg.sessionId || activeSessionId;
+        broadcast({ type: 'STATUS', status: 'thinking', sessionId: originSessionId });
+        broadcast({ type: 'TERMINAL_OUTPUT', output: `\n🏗️ [Project Mode] Starting multi-file build: ${prompt.slice(0, 80)}...\n` });
+
+        (async () => {
+          try {
+            // Check ollama is up first (the orchestrator depends on it)
+            const ok = await ollama.isAvailable().catch(() => false);
+            if (!ok) {
+              throw new Error('Ollama is not running at http://localhost:11434. Start it with `ollama serve`. The local orchestrator model (qwen2.5-coder:7b) is required for project mode.');
+            }
+
+            const sessionId = `proj_${Date.now()}`;
+            const orch = new Orchestrator({
+              workerModel: workerProvider,
+              sessionId,
+              onProgress: (p) => {
+                // Stream progress to the client + terminal
+                broadcast({ type: 'PROJECT_PROGRESS', sessionId: originSessionId, progress: p });
+                if (p.message) {
+                  broadcast({ type: 'TERMINAL_OUTPUT', output: `   ${p.message}\n` });
+                }
+                if (p.phase === 'planned' && p.plan) {
+                  broadcast({ type: 'TERMINAL_OUTPUT', output: `   📁 Planned ${p.plan.files.length} files:\n${p.plan.files.map(f => `      • ${f.path} — ${f.purpose}`).join('\n')}\n` });
+                }
+              },
+            });
+
+            // Build the worker dispatch function based on workerProvider
+            let workerFn = null;
+            if (workerProvider === 'chatgpt' || workerProvider === 'qwen') {
+              const controller = workerProvider === 'qwen' ? qwen : chatgpt;
+              const sessionHeadful = false;
+              workerFn = async (filePrompt) => {
+                const resp = await controller.sendPrompt(filePrompt, sessionHeadful, () => {});
+                return resp;
+              };
+              broadcast({ type: 'TERMINAL_OUTPUT', output: `   🔌 Using ${workerProvider} (web automation) as per-file worker — each file may take 30-100s.\n` });
+            } else {
+              broadcast({ type: 'TERMINAL_OUTPUT', output: `   ⚡ Using local qwen2.5-coder:7b for both planning + per-file generation (fastest).\n` });
+            }
+
+            const plan = await orch.plan(prompt);
+            const result = await orch.generateAll(workerFn);
+
+            // Save the result into the session as a special botMsg
+            const s = getSessionById(originSessionId);
+            const botMsg = {
+              id: Date.now().toString(),
+              sender: 'chatgpt',
+              text: `🏗️ Built project "${plan.name}" — ${result.files.length} files\n\n${result.files.map(f => `• ${f.path} (${f.bytes}b)`).join('\n')}${result.errors.length ? `\n\n⚠️ ${result.errors.length} errors: ${result.errors.map(e => e.path).join(', ')}` : ''}`,
+              mode: 'project',
+              timestamp: new Date().toLocaleTimeString(),
+              projectResult: result,
+            };
+            if (s) {
+              if (s.title.startsWith('Vibe Workspace') || s.messages.length === 0) {
+                s.title = prompt.substring(0, 32);
+              }
+              s.messages.push(botMsg);
+              s.projectSessionId = sessionId;
+              saveSession(s);
+            }
+
+            broadcast({
+              type: 'PROJECT_COMPLETE',
+              sessionId: originSessionId,
+              response: botMsg.text,
+              projectResult: result,
+              sessions: getAllSessions(),
+            });
+            broadcast({ type: 'STATUS', status: 'idle', sessionId: originSessionId });
+          } catch (err) {
+            console.error('[Server Error / BUILD_PROJECT]', err);
+            broadcast({ type: 'TERMINAL_OUTPUT', output: `\n❌ Project build failed: ${err.message}\n` });
+            broadcast({ type: 'ERROR', sessionId: originSessionId, error: err.message });
+            broadcast({ type: 'STATUS', status: 'idle', sessionId: originSessionId });
+          }
+        })();
+      }
+
       if (msg.type === 'AGENTIC_ACTION') {
         const { action, code, url } = msg;
         if (action === 'OPEN_URL_FIREFOX') {
@@ -777,6 +866,84 @@ app.get('/preview', (req, res) => {
 });
 
 app.get('/api/sessions', (req, res) => res.json(getAllSessions()));
+
+// Project file server: serves files from a project session's directory.
+// Two modes:
+//   /project/<sessionId>/<relative-path>  → specific file
+//   /project/<sessionId>                  → the project entry point (index.html / index.php-as-html)
+// All paths are sandboxed under PROJECTS_ROOT/<sessionId>/ via path.resolve check.
+// Bare project route — serve the entry point when no specific file requested.
+app.get('/project/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  const projectDir = path.join(PROJECTS_ROOT, sessionId);
+  if (!fs.existsSync(projectDir)) {
+    return res.status(404).type('text').send(`Project session not found: ${sessionId}`);
+  }
+  // prefer index.html, then index.php (served as static text since no PHP runtime)
+  for (const idx of ['index.html', 'index.php', 'public/index.html']) {
+    const candidate = path.join(projectDir, idx);
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      const ext = path.extname(candidate).toLowerCase();
+      // Serve PHP source as text/html for preview (no PHP runtime)
+      if (ext === '.php') res.type('text/html');
+      else res.type(ext === '.css' ? 'text/css' : (ext === '.js' ? 'text/javascript' : 'text/html'));
+      return res.send(fs.readFileSync(candidate, 'utf8'));
+    }
+  }
+  res.status(404).type('text').send(`No index.html or index.php in project ${sessionId}`);
+});
+
+app.get('/project/:sessionId/*filePath', (req, res) => {
+  const { sessionId } = req.params;
+  // Express 5's *filePath returns an ARRAY of path segments — join them back.
+  const filePathParts = req.params.filePath;
+  const rel = Array.isArray(filePathParts) ? filePathParts.join('/') : filePathParts;
+  const projectDir = path.join(PROJECTS_ROOT, sessionId);
+  if (!fs.existsSync(projectDir)) {
+    return res.status(404).type('text').send(`Project session not found: ${sessionId}`);
+  }
+  if (!rel) return res.redirect(`/project/${sessionId}`);
+  const candidate = path.resolve(projectDir, rel);
+  const rootResolved = path.resolve(projectDir);
+  if (candidate !== rootResolved && !candidate.startsWith(rootResolved + path.sep) && candidate !== rootResolved) {
+    return res.status(400).type('text').send('Invalid path (sandbox violation rejected)');
+  }
+  if (!fs.existsSync(candidate)) {
+    return res.status(404).type('text').send(`File not found: ${rel}`);
+  }
+  // Directory? serve index.html inside it
+  if (fs.statSync(candidate).isDirectory()) {
+    const idx = path.join(candidate, 'index.html');
+    if (fs.existsSync(idx)) {
+      res.type('text/html');
+      return res.send(fs.readFileSync(idx, 'utf8'));
+    }
+    return res.status(404).type('text').send(`No index.html in ${rel}/`);
+  }
+  // Serve the file with appropriate content-type (avoid sendFile's finicky send lib)
+  const ext = path.extname(candidate).toLowerCase();
+  if (ext === '.php') res.type('text/html');
+  else if (ext === '.css') res.type('text/css');
+  else if (ext === '.js') res.type('text/javascript');
+  else if (ext === '.json') res.type('application/json');
+  else res.type('text/html');
+  res.send(fs.readFileSync(candidate, 'utf8'));
+});
+
+// Project file-tree API: returns the tree for a project session (for the UI).
+app.get('/api/project/:sessionId/tree', (req, res) => {
+  const projectDir = path.join(PROJECTS_ROOT, req.params.sessionId);
+  if (!fs.existsSync(projectDir)) return res.status(404).json({ error: 'not found' });
+  const walk = (dir) => {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    return entries.map(e => {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) return { name: e.name, type: 'dir', children: walk(p) };
+      return { name: e.name, type: 'file', size: fs.statSync(p).size };
+    }).sort((a, b) => a.type !== b.type ? (a.type === 'dir' ? -1 : 1) : a.name.localeCompare(b.name));
+  };
+  res.json({ root: req.params.sessionId, tree: walk(projectDir) });
+});
 // Static route for desktop screenshots captured by the take_screenshot tool.
 // The tool writes to client/dist/screenshot.png and returns this URL — without
 // a route here, the URL would 404.

@@ -5,6 +5,71 @@ Format loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [1.4.0] — 2026-08-10
+
+### ✨ Added — PROJECT MODE (multi-file generation)
+
+Vibe GPT Studio can now build **multi-file projects** (PHP apps, MVC structures,
+frontend + backend splits) — not just single HTML files. This is the architecture
+change requested after the user observed the single-file vibe-coder couldn't
+handle "build a software with multiple files / php / file tree."
+
+**Architecture — local orchestrator + remote workers:**
+- A **local LLM** (`qwen2.5-coder:7b` via Ollama, runs at http://localhost:11434)
+  acts as the orchestrator: it plans the file tree, decomposes per-file sub-prompts,
+  and assembles the result on disk.
+- The big web models (ChatGPT / Qwen via automation) become **generation workers**:
+  each receives a focused single-file prompt (what they're good at), not a whole
+  project.
+- Worker selection: `workerProvider: 'local'` uses ollama for everything (fast,
+  free, offline — ~65s for a 3-file project); `workerProvider: 'chatgpt'|'qwen'`
+  uses web automation per-file (slower but uses the big models).
+
+**New files:**
+- `ollama_service.js` — Ollama HTTP client (generate, generateStream, listModels,
+  isAvailable). Uses Node's native fetch (no deps).
+- `multifile_extractor.js` — parses `\`\`\`lang path=<rel/path>` tagged fenced
+  blocks into a file tree. Includes `safeJoinPath` (rejects absolute + `..`
+  traversal + `.git/` escapes) and `buildFileTree` (UI tree builder).
+- `orchestrator.js` — the brain: `plan()` (JSON file tree via ollama with
+  `format:'json'` to force valid output) → `generateAll(workerFn)` (per-file
+  delegation + extract + write to disk + tree build).
+
+**New WS message:** `BUILD_PROJECT` — `{prompt, workerProvider, sessionId}`.
+Streams `PROJECT_PROGRESS` events (phase: planning/planned/generating/file-done/
+assembling/complete) with the live plan + per-file status, then `PROJECT_COMPLETE`
+with the full result.
+
+**New routes:**
+- `GET /project/:sessionId` — serves the project entry point (index.html/php).
+- `GET /project/:sessionId/<path>` — serves a specific project file (sandboxed).
+- `GET /api/project/:sessionId/tree` — returns the on-disk file tree.
+
+**Why this is better than single-file for multi-file asks:**
+- The orchestrator holds the full file tree in context, so cross-file references
+  match (verified E2E: `index.php` → references `TodoController`; `TodoController`
+  → references `Todo` model — both matched).
+- PHP source files are served as static HTML for preview (no PHP runtime needed
+  for structure/UI inspection).
+
+### ✅ Verified
+- Unit: `multifile_extractor` 7/7 tests pass (basic, quoted paths, nested dirs,
+  missing-path → error, `..` rejected, absolute rejected, language guessing).
+- E2E direct (orchestrator.js): 3-file PHP contact form + 4-file nested MVC todo
+  app — both produced correct files with matching cross-file references.
+- E2E live via WS + backend: PHP calculator (3 files, 65s, all written to disk,
+  preview routes serve HTTP 200 with correct content-types).
+
+### ⚠️ Requirements for project mode
+- Ollama running at http://localhost:11434 with at least `qwen2.5-coder:7b` (4.7GB).
+- ~6GB free RAM for the 7B model (the user's 30B models had to be unloaded — they
+  consumed 15GB and OOM-killed the orchestrator).
+- The 7B model runs at ~17 tok/s on the test hardware; expect ~20s per file.
+
+---
+
+---
+
 ## [1.3.0] — 2026-08-10
 
 ### 🐛 Fixed
