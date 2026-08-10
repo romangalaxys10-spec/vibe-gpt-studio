@@ -199,7 +199,24 @@ RULES:
     while ((match = regex.exec(text)) !== null) {
       const toolName = match[1];
       try {
-        const args = JSON.parse(match[2]);
+        // Tolerant JSON parse: models sometimes emit raw control chars (literal
+        // newlines/tabs) inside string values, which is invalid JSON. Escape
+        // them before parsing so multi-line content (e.g. write_file) survives.
+        let rawArgs = match[2];
+        // Escape raw control chars that appear inside string literals. Walk the
+        // string, tracking whether we're inside a double-quoted string.
+        let escaped = ''; let inStr = false; let escaped_char = false;
+        for (let i = 0; i < rawArgs.length; i++) {
+          const ch = rawArgs[i];
+          if (escaped_char) { escaped += ch; escaped_char = false; continue; }
+          if (ch === '\\' && inStr) { escaped += ch; escaped_char = true; continue; }
+          if (ch === '"') { inStr = !inStr; escaped += ch; continue; }
+          if (inStr && ch === '\n') { escaped += '\\n'; continue; }
+          if (inStr && ch === '\r') { escaped += '\\r'; continue; }
+          if (inStr && ch === '\t') { escaped += '\\t'; continue; }
+          escaped += ch;
+        }
+        const args = JSON.parse(escaped);
         if (this.tools[toolName]) {
           console.log(`[Agentic Tool Exec] Running ${toolName}...`, args);
           const res = await this.tools[toolName](args);

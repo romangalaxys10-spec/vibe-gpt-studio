@@ -327,12 +327,30 @@ ${prompt}`;
             // 3d. Prose-leak truncation.
             // Some providers (notably ChatGPT) emit the code, then CONTINUE writing
             // prose ("Key Design Features Implemented:…", "How to use:…"), then a
-            // stray </html>. Keep only up to the FIRST </html>; everything after is
-            // commentary that does not belong in the document. If the prose appeared
-            // BEFORE any closing tag, the truncation detector below will catch it.
+            // stray </html>. Two patterns to handle:
+            //   (a) prose AFTER </html>: keep only up to the FIRST </html>.
+            //   (b) prose BETWEEN the last structural tag (</style>, </script>,
+            //       </body>) and a trailing </html>: strip the prose block.
             const firstCloseHtml = code.search(/<\/html\s*>/i);
             if (firstCloseHtml >= 0) {
+              // (a) cut everything after the first </html>
               code = code.slice(0, firstCloseHtml + '</html>'.length).trimEnd();
+              // (b) if </body> is missing, look for prose between the last
+              //     structural close tag and </html>, and strip it.
+              if (!/<\/body\s*>/i.test(code)) {
+                // Find the last structural tag before </html>
+                const structuralMatch = code.match(/<\/(style|script|head|nav|footer|section|div|main|article|aside|p|ul|ol|table)[^>]*>\s*([\s\S]*?)<\/html>/i);
+                if (structuralMatch) {
+                  const between = structuralMatch[2].trim();
+                  // Heuristic: if the text between contains prose markers (capitalized
+                  // words, sentence punctuation, common explanation phrases) and no
+                  // HTML tags, it's leaked commentary.
+                  if (between.length > 0 && !/<[a-z!]/i.test(between) && /[A-Z][a-z]+ [a-z]+/i.test(between)) {
+                    code = code.slice(0, code.lastIndexOf(structuralMatch[1] + '>') + structuralMatch[1].length + 1);
+                    code = code.replace(/\s*<\/html>\s*$/i, '') + '\n</body>\n</html>';
+                  }
+                }
+              }
             }
 
             // 4. Detect truncation - STRUCTURAL, not lexical.
