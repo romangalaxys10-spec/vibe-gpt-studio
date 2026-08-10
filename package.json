@@ -1,0 +1,30 @@
+{
+  "name": "vibe-gpt-studio",
+  "version": "1.0.0",
+  "main": "electron_main.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "electron": "electron .",
+    "dev:electron": "concurrently \"node server.js\" \"cd client && npm run dev\" \"wait-on http://localhost:5173 && electron .\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "body-parser": "^2.3.0",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "playwright": "^1.62.1",
+    "playwright-core": "^1.62.1",
+    "sqlite3": "^6.0.1",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.4",
+    "electron": "^41.7.1",
+    "electron-builder": "^26.15.3",
+    "wait-on": "^9.1.0"
+  }
+}

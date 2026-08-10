@@ -1,0 +1,3 @@
+[submodule "automation/chatgpt-firefox-automation"]
+	path = automation/chatgpt-firefox-automation
+	url = https://github.com/romangalaxys10-spec/chatgpt-firefox-automation.git
