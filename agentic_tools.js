@@ -136,11 +136,58 @@ export class AgenticToolExecutor {
       // 3. COMPUTER USE & GUI DESKTOP AUTOMATION (Linux X11/Wayland)
       take_screenshot: async () => {
         const shotPath = path.join(process.cwd(), 'client', 'dist', 'screenshot.png');
+        const os = await import('os');
+        const sessionType = process.env.XDG_SESSION_TYPE || '';
+        const isWayland = sessionType === 'wayland' || !!process.env.WAYLAND_DISPLAY;
+        const screenshotsDir = path.join(os.default.homedir(), 'Pictures', 'Screenshots');
+
+        // helper: snapshot the newest screenshot file
+        const newestIn = (dir) => fs.existsSync(dir)
+          ? fs.readdirSync(dir).filter(f => f.endsWith('.png'))
+              .map(f => ({ f, mtime: fs.statSync(path.join(dir, f)).mtimeMs }))
+              .sort((a, b) => b.mtime - a.mtime)[0]
+          : null;
+
         try {
+          if (isWayland) {
+            // GNOME 50 / Wayland: X11 tools (import/scrot) capture BLACK frames.
+            // The xdg-desktop-portal Screenshot API is the only headless path,
+            // but GNOME 50 forces INTERACTIVE consent for non-flatpak callers —
+            // the non-interactive call returns but never writes a file.
+            // Strategy: trigger the portal (interactive=true opens GNOME's UI),
+            // the user clicks once to confirm, the file lands in
+            // ~/Pictures/Screenshots/ — we detect + copy it.
+            const before = newestIn(screenshotsDir);
+            try {
+              await execPromise(
+                `gdbus call --session --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop --method org.freedesktop.portal.Screenshot.Screenshot "" "{\\"interactive\\": <true>}"`,
+                { timeout: 4000 }
+              );
+            } catch (e) {}
+            // poll up to 30s for the user to confirm + the file to appear
+            let captured = null;
+            for (let i = 0; i < 60; i++) {
+              await new Promise(r => setTimeout(r, 500));
+              const newest = newestIn(screenshotsDir);
+              if (newest && (!before || newest.f !== before.f || newest.mtime > before.mtime)) {
+                captured = path.join(screenshotsDir, newest.f);
+                break;
+              }
+            }
+            if (captured) {
+              fs.copyFileSync(captured, shotPath);
+              return { ok: true, screenshotUrl: 'http://localhost:3099/screenshot.png', source: 'gnome-portal-wayland-interactive', capturedFrom: captured };
+            }
+            return {
+              ok: false,
+              error: 'GNOME 50 / Wayland requires interactive consent for screenshots. A confirmation dialog should have appeared — click "Share" to capture. If no dialog appeared, press Print Screen manually, then re-run; the tool will pick up the newest file in ~/Pictures/Screenshots/. Headless/non-interactive capture is blocked by GNOME 50 security policy.'
+            };
+          }
+          // X11 path
           await execPromise(`import -window root "${shotPath}" || gnome-screenshot -f "${shotPath}" || scrot "${shotPath}"`);
-          return { ok: true, screenshotUrl: 'http://localhost:3099/screenshot.png' };
+          return { ok: true, screenshotUrl: 'http://localhost:3099/screenshot.png', source: 'x11' };
         } catch (e) {
-          return { ok: false, error: 'Screenshot capture tool not available (install imagemagick or gnome-screenshot)' };
+          return { ok: false, error: `Screenshot capture failed (${isWayland ? 'Wayland' : 'X11'}): ${e.message}` };
         }
       },
 
