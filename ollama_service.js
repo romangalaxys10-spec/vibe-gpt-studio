@@ -44,7 +44,9 @@ class OllamaService {
 
   // Generate a completion (non-streaming). Returns the full response text.
   // Options: { temperature, num_predict, system, format (json|text), stop,
-  //            model (override the default model for this call) }
+  //            model (override the default model for this call),
+  //            draft_model, draft_num_predict (speculative decoding —
+  //            ollama accepts these but only engages spec decoding on MLX/Apple) }
   async generate(prompt, options = {}) {
     const body = {
       model: options.model || this.model,
@@ -58,6 +60,10 @@ class OllamaService {
     };
     if (options.system) body.system = options.system;
     if (options.format) body.format = options.format; // 'json' forces valid JSON
+    // Speculative-decoding fields (top-level in ollama's API, not under options).
+    // Silently ignored by non-MLX ollama backends — safe to always include.
+    if (options.draft_model) body.draft_model = options.draft_model;
+    if (options.draft_num_predict) body.draft_num_predict = options.draft_num_predict;
 
     const r = await fetch(`${OLLAMA_URL}/api/generate`, {
       method: 'POST',

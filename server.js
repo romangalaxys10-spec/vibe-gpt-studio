@@ -656,10 +656,13 @@ ${prompt}`;
       // plans the file tree, then per-file prompts go to either the local model
       // (fast, free) or ChatGPT/Qwen via web automation (when workerProvider set).
       if (msg.type === 'BUILD_PROJECT') {
-        const { prompt, workerProvider = 'local' } = msg;
+        const { prompt, workerProvider = 'local', draftModel = false } = msg;
         const originSessionId = msg.sessionId || activeSessionId;
         broadcast({ type: 'STATUS', status: 'thinking', sessionId: originSessionId });
         broadcast({ type: 'TERMINAL_OUTPUT', output: `\n🏗️ [Project Mode] Starting multi-file build: ${prompt.slice(0, 80)}...\n` });
+        if (draftModel) {
+          broadcast({ type: 'TERMINAL_OUTPUT', output: `   ⚡ Draft model (speculative decoding) requested for generation. Note: spec decoding requires a CPU llama-server path; on this GPU-only ollama setup it may fall back to standard generation.\n` });
+        }
 
         (async () => {
           try {
@@ -673,6 +676,7 @@ ${prompt}`;
             const orch = new Orchestrator({
               workerModel: workerProvider,
               sessionId,
+              draftModel,   // when true, generation passes draft_model option (spec decoding)
               onProgress: (p) => {
                 // Stream progress to the client + terminal
                 broadcast({ type: 'PROJECT_PROGRESS', sessionId: originSessionId, progress: p });

@@ -35,10 +35,15 @@ function ensureProjectsRoot() {
 }
 
 export class Orchestrator {
-  constructor({ workerModel = 'local', sessionId, onProgress } = {}) {
+  constructor({ workerModel = 'local', sessionId, onProgress, draftModel = false } = {}) {
     // workerModel: 'local' = use ollama for everything (fast, free, offline)
     //              'chatgpt' / 'qwen' = use web automation for per-file gen
+    // draftModel: when true, generation requests speculative decoding (draft model
+    //             alongside the target). Whether it actually engages depends on the
+    //             backend — ollama silently ignores draft_model on most setups, so
+    //             this is a no-op there; a llamacpp backend would honor it.
     this.workerModel = workerModel;
+    this.draftModel = draftModel;
     this.sessionId = sessionId || `proj_${Date.now()}`;
     this.projectRoot = path.join(PROJECTS_ROOT, this.sessionId);
     this.onProgress = onProgress || (() => {});
@@ -122,7 +127,16 @@ Rules:
           responseText = await workerSendFn(prompt, { file: f, plan });
         } else {
           // default: local generator (7b — better code quality; 1.5b hallucinates deps)
-          const r = await ollama.generate(prompt, { model: GENERATOR_MODEL, temperature: 0.2, num_predict: 1500 });
+          // When draftModel is toggled on, pass draft_model + draft_num_predict so a
+          // spec-decoding-capable backend can engage it. (Ollama currently ignores
+          // these fields for non-MLX backends — see CHANGELOG — but the option is
+          // threaded through so a future llamacpp_service backend honors it.)
+          const genOpts = { model: GENERATOR_MODEL, temperature: 0.2, num_predict: 1500 };
+          if (this.draftModel) {
+            genOpts.draft_model = PLANNER_MODEL; // small/fast draft
+            genOpts.draft_num_predict = 6;
+          }
+          const r = await ollama.generate(prompt, genOpts);
           responseText = r.text;
         }
       } catch (e) {

@@ -44,11 +44,22 @@ interface Message {
 
 export default function App() {
   const [provider, setProvider] = useState<'chatgpt' | 'qwen'>('chatgpt');
-  const [mode, setMode] = useState<'vibe_code' | 'agent' | 'brainstorm' | 'chat'>('vibe_code');
+  const [mode, setMode] = useState<'vibe_code' | 'agent' | 'brainstorm' | 'chat' | 'project'>('vibe_code');
   const [inputPrompt, setInputPrompt] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [isThinking, setIsThinking] = useState(false);
   const [headful, setHeadful] = useState(false);
+  // Draft model toggle (speculative decoding): when ON, the orchestrator's
+  // generation step uses a small draft model alongside the target for faster
+  // inference (where supported). Persisted to localStorage so it survives reloads.
+  const [draftModel, setDraftModel] = useState<boolean>(() => {
+    try { return localStorage.getItem('vibe:draftModel') === 'true'; } catch { return false; }
+  });
+  const toggleDraftModel = () => {
+    const next = !draftModel;
+    setDraftModel(next);
+    try { localStorage.setItem('vibe:draftModel', String(next)); } catch {}
+  };
   const [firefoxOk, setFirefoxOk] = useState<boolean | null>(null);
   const [cookieCount, setCookieCount] = useState<number>(0);
   const [qwenCookieCount, setQwenCookieCount] = useState<number>(0);
@@ -205,13 +216,26 @@ export default function App() {
     };
 
     setMessages(prev => [...prev, userMsg]);
-    wsRef.current?.send(JSON.stringify({
-      type: 'PROMPT',
-      prompt: inputPrompt,
-      mode,
-      provider,
-      sessionId: activeSessionId
-    }));
+
+    // Route by mode: "project" triggers multi-file BUILD_PROJECT (orchestrator);
+    // everything else goes through the standard PROMPT path.
+    if (mode === 'project') {
+      wsRef.current?.send(JSON.stringify({
+        type: 'BUILD_PROJECT',
+        prompt: inputPrompt,
+        workerProvider: 'local',
+        draftModel,           // toggle: speculative-decoding draft model
+        sessionId: activeSessionId
+      }));
+    } else {
+      wsRef.current?.send(JSON.stringify({
+        type: 'PROMPT',
+        prompt: inputPrompt,
+        mode,
+        provider,
+        sessionId: activeSessionId
+      }));
+    }
 
     setInputPrompt('');
   };
@@ -475,6 +499,29 @@ export default function App() {
             {headful ? <Eye size={14} /> : <EyeOff size={14} />}
             {headful ? 'ChatGPT Headful (Visible)' : 'ChatGPT Headless (Background)'}
           </button>
+
+          <button
+            onClick={toggleDraftModel}
+            title="When ON, generation uses a small draft model alongside the target for faster inference (speculative decoding) where the backend supports it. On GPU-limited setups the orchestrator already uses a small planner model — this toggle controls the per-file generation path."
+            style={{
+              width: '100%',
+              padding: '8px',
+              borderRadius: '8px',
+              border: '1px solid #334155',
+              background: draftModel ? '#1E293B' : '#0F1420',
+              color: draftModel ? '#00F2FE' : '#94A3B8',
+              fontWeight: 500,
+              fontSize: '11px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '6px',
+              marginTop: '4px'
+            }}>
+            <Zap size={14} />
+            {draftModel ? '⚡ Draft Model ON (Spec Decode)' : 'Draft Model OFF'}
+          </button>
         </div>
 
       </div>
@@ -529,6 +576,7 @@ export default function App() {
               }}>
               <option value="vibe_code" style={{ background: '#0F1420', color: '#FFF' }}>⚡ Vibe Coding Mode</option>
               <option value="agent" style={{ background: '#0F1420', color: '#FFF' }}>🤖 Agentic Loop Mode (Terminal & Tools)</option>
+              <option value="project" style={{ background: '#0F1420', color: '#FFF' }}>🏗️ Project Mode (Multi-file + Orchestrator)</option>
               <option value="brainstorm" style={{ background: '#0F1420', color: '#FFF' }}>💡 Brainstorming Mode</option>
               <option value="chat" style={{ background: '#0F1420', color: '#FFF' }}>💬 Free Chat Mode</option>
             </select>
