@@ -604,7 +604,44 @@ export default function App() {
               <div style={{ fontSize: '14px', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
                 {/* For vibe_code mode with extracted code, skip raw text display - code blocks are shown below with preview buttons */}
                 {!((msg.extractedCode && msg.extractedCode.length > 0) && msg.mode === 'vibe_code') && (
-                  <>{msg.text}</>
+                  (() => {
+                    // Render message text with: inline images for image URLs,
+                    // clickable links for other URLs, plain text otherwise.
+                    // Splits the text on URL boundaries so prose + URLs + images
+                    // can coexist in one message (e.g. screenshot results).
+                    const text = msg.text || '';
+                    const urlRe = /(https?:\/\/[^\s<>"')]+)|(www\.[^\s<>"')]+)/gi;
+                    const parts: { type: 'text' | 'link' | 'image'; value: string }[] = [];
+                    let last = 0; let m;
+                    while ((m = urlRe.exec(text)) !== null) {
+                      if (m.index > last) parts.push({ type: 'text', value: text.slice(last, m.index) });
+                      const raw = m[0];
+                      const href = raw.startsWith('http') ? raw : `https://${raw}`;
+                      const isImage = /\.(png|jpe?g|gif|webp|svg|bmp)(\?|$)/i.test(raw);
+                      parts.push({ type: isImage ? 'image' : 'link', value: href });
+                      last = m.index + raw.length;
+                    }
+                    if (last < text.length) parts.push({ type: 'text', value: text.slice(last) });
+                    return parts.map((p, i) => {
+                      if (p.type === 'image') {
+                        return (
+                          <span key={i} style={{ display: 'inline-block', marginTop: '8px' }}>
+                            <img
+                              src={p.value}
+                              alt="screenshot"
+                              style={{ maxWidth: '100%', borderRadius: '8px', border: '1px solid #1E293B', display: 'block' }}
+                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                            />
+                            <a href={p.value} target="_blank" rel="noopener noreferrer" style={{ display: 'block', fontSize: '11px', color: '#00F2FE', marginTop: '4px' }}>Open full size ↗</a>
+                          </span>
+                        );
+                      }
+                      if (p.type === 'link') {
+                        return <a key={i} href={p.value} target="_blank" rel="noopener noreferrer" style={{ color: '#00F2FE', textDecoration: 'underline' }}>{p.value}</a>;
+                      }
+                      return <span key={i}>{p.value}</span>;
+                    });
+                  })()
                 )}
               </div>
 
