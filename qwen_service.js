@@ -177,7 +177,7 @@ export class QwenAutomationController {
 
       // Targeted Qwen Studio Textarea Selector
       // NOTE: must target the chat composer specifically - the page may also contain
-      // a Monaco code-editor textarea (aria-label="Editor content", class="inputarea
+      // a Monaco code-editor textarea (aria-label="Editor content", class "inputarea
       // monaco-mouse-cursor-text") from artifact/vibe-coding conversations, which is
       // readonly and would match a bare `textarea` selector first.
       const inputSelector = 'textarea.message-input-textarea';
@@ -237,10 +237,39 @@ export class QwenAutomationController {
 
       // Wait for the new assistant message to appear (count increases)
       const appearDeadline = Date.now() + 60000;
+      let diagnosticDumped = false;
       while (Date.now() < appearDeadline) {
         let count = 0;
         try { count = await page.locator(assistantSel).count(); } catch (e) {}
         if (count > countBefore) break;
+        // Quota / service-gate detection: if 8s pass with no new assistant message,
+        // check whether qwen.ai is refusing to generate (free-tier daily limit,
+        // login wall, captcha, maintenance). Bail fast with a clear error instead
+        // of hanging the full 60s+ appear window.
+        if (!diagnosticDumped && Date.now() - this.lastRequestTime > 8000) {
+          diagnosticDumped = true;
+          try {
+            const bodyText = (await page.locator('body').innerText().catch(() => ''));
+            // "Rules: 3/3" / "Rules: N/N" is qwen's free-tier quota indicator
+            const quotaMatch = bodyText.match(/Rules:\s*\d+\s*\/\s*\d+/i);
+            const loginWall = /Log in|Sign up/i.test(bodyText) && !/Log out/i.test(bodyText)
+              && await page.locator('textarea.message-input-textarea').count() === 0;
+            if (quotaMatch) {
+              console.warn('[Qwen Automator] Quota exhausted detected:', quotaMatch[0]);
+              throw new Error(`Qwen free-tier quota exhausted (${quotaMatch[0]}). The message was sent but qwen.ai refused to generate. Quota resets daily; use a paid account or wait for reset.`);
+            }
+            if (loginWall) {
+              console.warn('[Qwen Automator] Login wall detected');
+              throw new Error('Qwen session is logged out (login wall visible). Re-authenticate in Firefox, then restart the backend.');
+            }
+            // No quota/login gate but still no response — log a short diagnostic
+            console.warn('[Qwen Automator] No assistant response after 8s. Body tail:', bodyText.slice(-200).replace(/\s+/g, ' '));
+          } catch (diagErr) {
+            if (diagErr.message && diagErr.message.includes('quota exhausted')) throw diagErr;
+            if (diagErr.message && diagErr.message.includes('logged out')) throw diagErr;
+            // other diagnostic errors are non-fatal
+          }
+        }
         await page.waitForTimeout(800);
       }
 
@@ -273,6 +302,13 @@ export class QwenAutomationController {
         } catch (e) {}
 
         if (current.length > 0) generatedSome = true;
+
+        // Fast-fail: if 30s pass and NOTHING was ever generated, the provider is
+        // refusing (quota/rate-limit/login wall). Bail instead of waiting 4 min.
+        if (!generatedSome && Date.now() - this.lastRequestTime > 30000) {
+          console.warn('[Qwen Automator] No generation after 30s — provider not responding (quota/rate-limit/login). Aborting.');
+          break;
+        }
 
         if (current.length > lastText.length) {
           const newChunk = current.slice(lastText.length);

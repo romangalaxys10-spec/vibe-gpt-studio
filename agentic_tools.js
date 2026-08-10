@@ -182,6 +182,7 @@ Tool catalog:
 
 RULES:
 - Output the TOOL: line on its OWN line, with valid JSON (double-quoted keys).
+- The tool_name MUST be one of the 8 names listed above (exec_command, open_application, navigate_url, read_file, write_file, take_screenshot, click_mouse, type_keyboard). Do NOT invent tool names like "noop", "ack", or "respond" — those are invalid and will be rejected.
 - Do NOT wrap tool calls in markdown code fences. Do NOT add prose around them.
 - If the user wants CODE (not a system action), output pure code as usual — no TOOL: line.
 - Emit only ONE tool call per turn. The host executes it and returns the result.`;

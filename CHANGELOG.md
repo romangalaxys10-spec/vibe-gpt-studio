@@ -5,6 +5,64 @@ Format loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [1.3.0] — 2026-08-10
+
+### 🐛 Fixed
+- **Qwen automation hung for 4+ minutes when the provider refused to generate**
+  (`qwen_service.js`). When qwen.ai hit its free-tier daily quota (`Rules: 3/3`),
+  the message was typed and submitted, but no assistant message ever appeared.
+  The stability-loop then polled the DOM for the full 240s deadline before
+  giving up — making every qwen turn look like a permanent hang. Now:
+  1. **8s no-response detector**: after 8s with no new assistant message, scan
+     the body for the `Rules: N/N` quota indicator or a login wall. If found,
+     throw a clear error immediately ("Qwen free-tier quota exhausted — resets
+     daily").
+  2. **30s fast-fail in stability loop**: if 30s pass and zero text was ever
+     generated, abort instead of waiting 4 minutes.
+
+- **Agent-mode system prompt contradicted the TOOL: contract** (`server.js`).
+  The prompt said "Output ONLY JSON or executable command blocks", which made
+  ChatGPT respond with `{"status":"ready"}` JSON acks instead of `TOOL:` lines.
+  Rewrote the contract to explicitly forbid JSON status objects and require the
+  exact `TOOL: <name> <json>` format.
+
+- **ChatGPT hedged with `TOOL: noop {}` for unfamiliar tools** (`server.js`,
+  `agentic_tools.js`). When asked to take a screenshot / write a file /
+  navigate, ChatGPT emitted `noop` (a hallucinated tool name) instead of the
+  real one. Two mitigations:
+  1. Tool catalog now explicitly enumerates the 8 valid names and forbids
+     invented names like `noop`, `ack`, `respond`.
+  2. Server-side auto-retry: when `parseAndExecuteTools` reports an unknown
+     tool, the server re-dispatches one correction prompt ("use one of these 8
+     names") and accepts the corrected result.
+
+### ✅ Verified
+- ChatGPT `exec_command` end-to-end: model emits `TOOL: exec_command`, executor
+  runs `ls -la /tmp`, stdout returned.
+- ChatGPT `read_file` end-to-end: model emits `TOOL: read_file`, reads
+  `/etc/hostname` → `roman-WUJIE-Series`.
+- All 8 tool wrappers (Layer 1 unit suite): correct behavior on direct
+  invocation.
+
+### ⚠️ Known limitations (honest)
+- **Qwen free-tier quota**: the daily message limit blocks live qwen tool-
+  calling tests until reset. The automation is correct (verified earlier: qwen
+  emitted `TOOL: exec_command` and returned `QWEN-E2E-MARKER`); the block is
+  the account quota, not code.
+- **ChatGPT model non-cooperation**: when driven headlessly through chatgpt.com,
+  the model intermittently refuses to follow the TOOL: protocol — returning
+  short ack strings (`CHATGPT_OK`, `{"status":"ready"}`) instead of tool calls,
+  especially for less-common tools (screenshot, write_file, navigate).
+  `exec_command` and `read_file` are reliable; the others work sometimes. A
+  native function-calling API integration (instead of web-UI prompting) would
+  be substantially more robust.
+- **Browser automation is heavy**: launching headless Firefox while the user's
+  desktop Firefox + Discord are loaded (21GB/30GB RAM used) can OOM-kill the
+  playwright process. The backend reuses one persistent context per provider to
+  mitigate this; spawning additional concurrent contexts is not supported.
+
+---
+
 ## [1.2.0] — 2026-08-10
 
 ### 🐛 Fixed

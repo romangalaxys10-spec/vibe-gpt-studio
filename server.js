@@ -189,12 +189,16 @@ wss.on('connection', (ws) => {
 
             fullPrompt = `You are Vibe GPT Studio Agent.
 You operate inside a local Ubuntu desktop environment.
-You have access to tools provided by the host application.
+You have access to LOCAL EXECUTION TOOLS provided by the host application.
 
-Rules:
-- When a task requires local execution or opening an app, output a command block or tool call.
-- Output ONLY JSON or executable command blocks when requested to perform actions.
-- Never claim you cannot control the desktop; the host engine intercepts and executes all your commands automatically.
+YOUR ONLY JOB: when the user asks you to DO something on the system, respond with EXACTLY ONE tool invocation line in this exact format and NOTHING ELSE:
+
+TOOL: <tool_name> <json_arguments>
+
+Do NOT output JSON status objects like {"status":"ready"}.
+Do NOT output prose, acknowledgements, or explanations.
+Do NOT wrap tool calls in markdown fences.
+The host executes the TOOL: line and returns the result — you do not need to confirm anything.
 
 ${localSysInfo}
 ${agenticTools.getToolDefinitions()}
@@ -451,8 +455,28 @@ ${prompt}`;
             }
           }
 
-          // Auto-execute any explicit agentic tools emitted by ChatGPT
-          const toolResults = await agenticTools.parseAndExecuteTools(responseText);
+          // Auto-execute any explicit agentic tools emitted by ChatGPT.
+          // If the model emitted an UNKNOWN tool name (e.g. "noop"), retry ONCE
+          // with a correction nudge before giving up — ChatGPT sometimes hedges.
+          let toolResults = await agenticTools.parseAndExecuteTools(responseText);
+          const hasUnknownTool = toolResults.some(r => r.error && r.error.includes('Unknown tool'));
+          if (hasUnknownTool && provider === 'chatgpt') {
+            console.warn('[VIBE] Model emitted unknown tool name — retrying with correction');
+            try {
+              const retryResp = await controller.sendPrompt(
+                `Your previous response used an invalid tool name. You MUST use one of: exec_command, open_application, navigate_url, read_file, write_file, take_screenshot, click_mouse, type_keyboard. Re-emit your intended action as a single valid TOOL: line now.`,
+                sessionHeadful,
+                () => {}
+              );
+              const retryResults = await agenticTools.parseAndExecuteTools(sanitizeOutput(retryResp));
+              if (retryResults.some(r => r.result && r.result.ok)) {
+                toolResults = retryResults;
+                responseText = sanitizeOutput(retryResp);
+              }
+            } catch (retryErr) {
+              console.warn('[VIBE] Tool-retry failed:', retryErr.message);
+            }
+          }
           if (toolResults.length > 0) {
             broadcast({ type: 'TERMINAL_OUTPUT', output: `\n🤖 [Agentic Tool Execution Results]:\n${JSON.stringify(toolResults, null, 2)}\n` });
           }
