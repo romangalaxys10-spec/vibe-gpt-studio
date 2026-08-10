@@ -213,39 +213,184 @@ ${prompt}`;
             broadcast({ type: 'STREAM_TOKEN', token, text: cleanStream });
           });
 
+          // === RESPONSE INTEGRITY VERIFICATION ===
+          const rawResponse = responseText; // Capture raw before sanitization
+
           // Sanitize final response text
           responseText = sanitizeOutput(responseText);
 
-          const codeBlockRegex = /```(html|css|js|jsx|ts|tsx)?\n?([\s\S]*?)```/gi;
-          let match;
-          const extractedCode = [];
-          while ((match = codeBlockRegex.exec(responseText)) !== null) {
-            const lang = (match[1] || '').toLowerCase();
-            const code = match[2].trim();
-            
-            // Skip shell scripts and system prompt echoed text blocks
-            if (lang === 'bash' || lang === 'sh' || code.startsWith('#!/') || code.includes('launch_preview.sh') || code.includes('CRITICAL INSTRUCTION: DO NOT GENERATE IMAGES')) {
-              continue;
+          // ============================================================
+          // UNIFIED CODE EXTRACTION - HANDLES CHATGPT (fences) + QWEN (raw)
+          // ============================================================
+          function extractGeneratedCode(text) {
+            if (!text) {
+              return { code: "", source: "none", language: null, truncated: false, truncationReason: null };
             }
-            if (code && !extractedCode.includes(code)) {
-              extractedCode.push(code);
+
+            let source = "raw";
+            let language = null;
+            let code = text;
+
+            // 1. Markdown fenced code - ChatGPT / normal providers
+            const fencedMatch = text.match(/```([a-zA-Z0-9_+-]*)\s*\n([\s\S]*?)```/);
+            if (fencedMatch) {
+              language = (fencedMatch[1] || "").toLowerCase() || null;
+              code = fencedMatch[2];
+              source = "markdown-fence";
+            } else {
+              // 2. Qwen raw response: language identifier + line numbers + HTML
+              const languageMatch = text.match(/^\s*(html|css|js|jsx|ts|tsx|python|json|xml|svg)\s*(?:\r?\n|$)/i);
+              if (languageMatch) {
+                language = languageMatch[1].toLowerCase();
+                code = text.slice(languageMatch[0].length);
+                source = "qwen-raw";
+              }
+
+              // Find actual source start (DOCTYPE or <html>)
+              const htmlStart = code.search(/<!doctype\s+html\b|<html(?:\s[^>]*)?>/i);
+              if (htmlStart >= 0) {
+                code = code.slice(htmlStart);
+              }
             }
+
+            // 3. Remove Qwen / UI line-number prefixes (handles "1 <!DOCTYPE" or standalone "1")
+            code = code
+              .split(/\r?\n/)
+              .map(line => {
+                line = line.replace(/^\s*\d+\s+(?=[<"'`])/, "");
+                line = line.replace(/^\s*\d+\s*$/, "");
+                return line;
+              })
+              .join("\n")
+              .trim();
+
+            // 3b. Strip ANY injected marker text FIRST (defensive) - a literal substring like
+            // "</html>" inside a marker string must never fool the closing-tag checks.
+            code = code
+              .replace(/\[TRUNCATED[^\]]*\]/gi, '')
+              .replace(/generation stopped[^\n]*/gi, '')
+              .replace(/\[CONTINUE[^\]]*\]/gi, '')
+              .trim();
+
+            // 3c. Strip trailing UI artifacts that Qwen appends after the code
+            // ("Preview", "Copy code", "Run in browser" buttons rendered as text)
+            code = code
+              .replace(/\s*Preview\s*$/i, '')
+              .replace(/\s*Copy code\s*$/i, '')
+              .replace(/\s*Run in browser\s*$/i, '')
+              .replace(/\s*Build it\s*$/i, '')
+              .trim();
+
+            // 4. Detect truncation - STRUCTURAL, not lexical.
+            // A response is only complete when the closing tags are the LAST tokens,
+            // not merely present somewhere in the text.
+            const hasHtmlDocument = /<!doctype\s+html\b/i.test(code) || /<html(?:\s[^>]*)?>/i.test(code);
+            const hasClosingHtml = /<\/html\s*>\s*$/i.test(code);
+            const hasClosingBody = /<\/body\s*>\s*$/i.test(code) || /<\/body\s*>[\s\S]*<\/html\s*>/i.test(code);
+            const hasClosingHead = /<\/head\s*>/i.test(code);
+            const endsAbruptly = /(?:^|\s)(preview)\s*$/i.test(code);
+
+            let truncated = false;
+            let truncationReason = null;
+
+            if (hasHtmlDocument && (!hasClosingHtml || !hasClosingBody)) {
+              truncated = true;
+              truncationReason = "missing-closing-tags";
+            }
+            if (endsAbruptly) {
+              truncated = true;
+              truncationReason = "response-ended-at-preview";
+            }
+            if (hasHtmlDocument && !hasClosingHtml && code.length < 5000 && !truncationReason) {
+              truncated = true;
+              truncationReason = "incomplete-html-document";
+            }
+
+            return { code, source, language, truncated, truncationReason };
           }
 
-          if (extractedCode.length === 0) {
-            const lines = responseText.split('\n');
-            let currentBlock = [];
-            let inBlock = false;
-            for (const line of lines) {
-              if (line.startsWith('import ') || line.startsWith('export ') || line.startsWith('def ') || line.startsWith('function ') || line.startsWith('<!DOCTYPE') || line.startsWith('<html')) {
-                inBlock = true;
-              }
-              if (inBlock) currentBlock.push(line);
-            }
-            if (currentBlock.length > 0) {
-              const code = currentBlock.join('\n').trim();
-              if (!code.includes('launch_preview.sh') && !code.includes('CRITICAL INSTRUCTION')) {
-                extractedCode.push(code);
+          // ============================================================
+          // EXTRACTION MUST FINISH BEFORE VERIFICATION
+          // ============================================================
+          const extraction = extractGeneratedCode(responseText);
+          const extractedCode = extraction.code ? [extraction.code] : [];
+
+          // ============================================================
+          // VERIFICATION - created AFTER extraction (integrity check)
+          // ============================================================
+          const verification = {
+            provider,
+            rawLength: rawResponse.length,
+            sanitizedLength: responseText.length,
+            cleanLength: responseText.length,
+            extractedCodeCount: extractedCode.length,
+            extractedCodeLength: extractedCode.length ? extractedCode[0].length : 0,
+            extractionSource: extraction.source,
+            detectedLanguage: extraction.language,
+            hasHtml: /<html(?:\s[^>]*)?>/i.test(extractedCode[0] || ''),
+            hasDoctype: /<!doctype\s+html\b/i.test(extractedCode[0] || ''),
+            hasClosingHtml: /<\/html\s*>\s*$/i.test(extractedCode[0] || ''),
+            hasClosingBody: /<\/body\s*>\s*$/i.test(extractedCode[0] || '') || /<\/body\s*>[\s\S]*<\/html\s*>/i.test(extractedCode[0] || ''),
+            hasClosingHead: /<\/head\s*>/i.test(extractedCode[0] || ''),
+            truncated: extraction.truncated,
+            truncationReason: extraction.truncationReason,
+            integrityOk: !extraction.truncated && extractedCode.length > 0,
+            issues: []
+          };
+
+          if (extraction.truncated) {
+            verification.issues.push(`TRUNCATED_RESPONSE: ${extraction.truncationReason}`);
+            verification.integrityOk = false;
+          }
+          if (extractedCode.length === 0 && (responseText.includes('<html') || responseText.includes('<!DOCTYPE'))) {
+            verification.issues.push('NO_CODE_EXTRACTED: HTML detected but no code blocks extracted');
+            verification.integrityOk = false;
+          }
+
+          if (extraction.truncated) {
+            console.warn("[VIBE] Generated response appears truncated:", {
+              source: verification.extractionSource,
+              reason: verification.truncationReason,
+              length: verification.extractedCodeLength
+            });
+
+            // === AUTO-CONTINUE: ask the provider to complete the truncated code ===
+            // Qwen pauses mid-generation; a short follow-up "continue" prompt makes it
+            // resume and emit the missing tail (closing tags, rest of the file).
+            if (provider === 'qwen' && (verification.truncationReason === 'missing-closing-html' || verification.truncationReason === 'missing-closing-tags')) {
+              console.warn("[VIBE] Requesting Qwen to continue the truncated HTML...");
+              try {
+                const continueResp = await controller.sendPrompt(
+                  "[CONTINUE OUTPUT] You were generating an HTML file but stopped before the closing </html> tag. Continue EXACTLY where you left off and complete the entire rest of the file, ending with </html>. Output ONLY the remaining code, no explanations, no markdown fences.",
+                  activeSession.headful,
+                  (token, fullText) => { broadcast({ type: 'STREAM_TOKEN', token, text: sanitizeOutput(fullText) }); }
+                );
+                const continueSanitized = sanitizeOutput(continueResp);
+                const continueExtraction = extractGeneratedCode(continueSanitized);
+                const continueCode = continueExtraction.code || '';
+                if (continueCode && continueCode.trim().length > 0) {
+                  // Merge: original partial + continuation, then rebuild the code block
+                  const mergedRaw = (extractedCode[0] || '') + '\n' + continueCode;
+                  const mergedExtraction = extractGeneratedCode(mergedRaw);
+                  if (mergedExtraction.code && mergedExtraction.code.trim().length > 0) {
+                    extractedCode[0] = mergedExtraction.code;
+                    responseText = mergedExtraction.code;
+                    verification.truncated = mergedExtraction.truncated;
+                    verification.truncationReason = mergedExtraction.truncationReason;
+                    verification.hasClosingHtml = /<\/html\s*>\s*$/i.test(extractedCode[0]);
+                    verification.integrityOk = !mergedExtraction.truncated && extractedCode.length > 0;
+                    verification.extractedCodeLength = extractedCode[0].length;
+                    verification.issues = verification.issues.filter(i => !i.startsWith('TRUNCATED_RESPONSE'));
+                    if (mergedExtraction.truncated) {
+                      verification.issues.push('TRUNCATED_RESPONSE: still incomplete after auto-continue');
+                    } else {
+                      verification.issues.push('RECOVERED: auto-continue completed the HTML');
+                    }
+                    console.warn("[VIBE] Auto-continue merged. New length:", extractedCode[0].length, "| closing html:", verification.hasClosingHtml);
+                  }
+                }
+              } catch (contErr) {
+                console.error('[VIBE] Auto-continue failed:', contErr.message);
               }
             }
           }
@@ -326,7 +471,8 @@ ${prompt}`;
             text: responseText,
             mode,
             timestamp: new Date().toLocaleTimeString(),
-            extractedCode
+            extractedCode,
+            verification
           };
 
           const activeS = getSessionById(activeSessionId);
@@ -340,6 +486,7 @@ ${prompt}`;
             response: responseText,
             extractedCode,
             mode,
+            verification,
             sessions: getAllSessions()
           });
           broadcast({ type: 'STATUS', status: 'idle' });
@@ -440,12 +587,57 @@ import { subAgentManager } from './subagent_orchestrator.js';
 
 // REST Session & Sub-Agent Endpoints
 app.get('/preview', (req, res) => {
+  // Session-aware live preview.
+  // Priority:
+  //   1. ?session=<id>  -> serve that session's most recent assistant extractedCode
+  //   2. (fallback)     -> serve the static client/dist/preview.html written by
+  //                        the SERVE_AND_OPEN_FIREFOX agentic action, if any
+  //   3. (else)         -> helpful placeholder
+  const sessionId = req.query.session;
+  if (sessionId) {
+    const session = getSessionById(sessionId);
+    if (session && Array.isArray(session.messages)) {
+      // Walk messages in reverse to find the latest assistant message with extracted code
+      for (let i = session.messages.length - 1; i >= 0; i--) {
+        const m = session.messages[i];
+        if (m && m.sender === 'chatgpt' && Array.isArray(m.extractedCode) && m.extractedCode.length > 0) {
+          let code = m.extractedCode[0] || '';
+          // Truncate at end of HTML document to strip any trailing prompt leaks
+          if (code.includes('</html>')) {
+            code = code.substring(0, code.indexOf('</html>') + 7);
+          }
+          // Wrap bare fragments in a full document so the iframe renders them
+          if (!/<html[\s>]/i.test(code)) {
+            code = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Vibe Studio Live Preview</title></head><body>${code}</body></html>`;
+          }
+          res.type('html').send(code);
+          return;
+        }
+      }
+      // Session exists but has no extractable code yet
+      return res.status(200).type('html').send(
+        '<!DOCTYPE html><html><head><meta charset="utf-8"/><title>No preview</title>' +
+        '<style>body{background:#0b0f17;color:#94A3B8;font-family:system-ui;padding:40px;text-align:center}</style></head>' +
+        '<body><h2>No generated code in this session yet</h2>' +
+        `<p>Session: <code>${sessionId}</code></p>` +
+        '<p>Send a prompt in Vibe GPT Studio to generate a preview.</p></body></html>'
+      );
+    }
+    // Unknown session id
+    return res.status(404).type('html').send(
+      '<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Session not found</title>' +
+      '<style>body{background:#0b0f17;color:#ef4444;font-family:system-ui;padding:40px;text-align:center}</style></head>' +
+      `<body><h2>Session not found</h2><p><code>${sessionId}</code></p></body></html>`
+    );
+  }
+
+  // No session specified — fall back to the static preview file if the agentic
+  // SERVE_AND_OPEN_FIREFOX action wrote one.
   const previewPath = path.join(process.cwd(), 'client', 'dist', 'preview.html');
   if (fs.existsSync(previewPath)) {
-    res.sendFile(previewPath);
-  } else {
-    res.send('<h1>No code preview built yet</h1><p>Generate code in Vibe GPT Studio to render it live here.</p>');
+    return res.sendFile(previewPath);
   }
+  res.type('html').send('<h1>No code preview built yet</h1><p>Generate code in Vibe GPT Studio, or open <code>/preview?session=&lt;id&gt;</code> to render a specific session.</p>');
 });
 
 app.get('/api/sessions', (req, res) => res.json(getAllSessions()));

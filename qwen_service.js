@@ -140,8 +140,10 @@ export class QwenAutomationController {
     await this.page.goto('https://chat.qwen.ai', { waitUntil: 'domcontentloaded', timeout: 45000 });
 
     // Wait for the chat composer to be present (means the SPA rendered)
+    // Use the specific composer selector - a Monaco code-editor textarea may also
+    // exist on the page from artifact/vibe-coding conversations.
     try {
-      await this.page.waitForSelector('textarea.message-input-textarea, textarea, div[contenteditable="true"]', { timeout: 20000 });
+      await this.page.waitForSelector('textarea.message-input-textarea', { timeout: 20000 });
     } catch (e) { /* tolerate */ }
 
     return this.page;
@@ -174,36 +176,56 @@ export class QwenAutomationController {
       } catch (e) {}
 
       // Targeted Qwen Studio Textarea Selector
-      const inputSelector = 'textarea.message-input-textarea, textarea, div[contenteditable="true"]';
+      // NOTE: must target the chat composer specifically - the page may also contain
+      // a Monaco code-editor textarea (aria-label="Editor content", class="inputarea
+      // monaco-mouse-cursor-text") from artifact/vibe-coding conversations, which is
+      // readonly and would match a bare `textarea` selector first.
+      const inputSelector = 'textarea.message-input-textarea';
+      let inputFound = false;
       try {
         await page.waitForSelector(inputSelector, { timeout: 15000 });
-        await page.focus(inputSelector);
-        await page.keyboard.press('Control+A');
-        await page.keyboard.press('Backspace');
-
-        if (prompt.length < 300) {
-          await page.type(inputSelector, prompt, { delay: 20 + Math.floor(Math.random() * 30) });
-        } else {
-          const chunks = prompt.match(/[\s\S]{1,120}/g) || [prompt];
-          for (const chunk of chunks) {
-            await page.type(inputSelector, chunk, { delay: 10 + Math.floor(Math.random() * 15) });
-            try { await page.waitForTimeout(100 + Math.floor(Math.random() * 200)); } catch (e) {}
-          }
-        }
+        inputFound = true;
       } catch (e) {
-        console.warn('[Qwen Automator] Primary focus failed, attempting fallback click typing:', e.message);
-        try {
-          await page.click(inputSelector);
-          await page.keyboard.type(prompt, { delay: 20 });
-        } catch (e2) {}
+        // Fallbacks: composer inside the chat input container, then contenteditable
+        for (const alt of ['div[class*="input"] textarea:not([readonly])', 'div[contenteditable="true"]']) {
+          try {
+            if (await page.locator(alt).count() > 0) { inputFound = true; break; }
+          } catch (e2) {}
+        }
+      }
+      if (!inputFound) {
+        throw new Error('Qwen chat composer not found (check login state)');
       }
 
+      // Focus the composer, clear it, and type with real keystrokes
+      await page.focus(inputSelector);
+      await page.keyboard.press('Control+A');
+      await page.keyboard.press('Backspace');
+
+      if (prompt.length < 300) {
+        await page.type(inputSelector, prompt, { delay: 20 + Math.floor(Math.random() * 30) });
+      } else {
+        const chunks = prompt.match(/[\s\S]{1,120}/g) || [prompt];
+        for (const chunk of chunks) {
+          await page.type(inputSelector, chunk, { delay: 10 + Math.floor(Math.random() * 15) });
+          await page.waitForTimeout(100 + Math.floor(Math.random() * 200));
+        }
+      }
+      await page.waitForTimeout(500);
+
+      // Count assistant messages BEFORE submitting - the new response is a NEW element.
+      // (Reading it after the send click races: a fast response is already counted.)
+      const assistantSel = '.qwen-chat-message-assistant, .chat-response-message';
+      let countBefore = 0;
+      try {
+        countBefore = await page.locator(assistantSel).count();
+      } catch (e) {}
+
       // Submit via the send button if present, else Enter
-      try { await page.waitForTimeout(500); } catch (e) {}
       let sent = false;
       try {
         const sendBtn = page.locator('button.send-button, button[aria-label*="send" i], button[data-testid*="send"]').first();
-        if (await sendBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+        if (await sendBtn.isVisible().catch(() => false)) {
           await sendBtn.click();
           sent = true;
         }
@@ -212,13 +234,6 @@ export class QwenAutomationController {
         await page.keyboard.press('Enter');
       }
       this.lastRequestTime = Date.now();
-
-      // Count assistant messages BEFORE sending - the new response is a NEW element
-      const assistantSel = '.qwen-chat-message-assistant, .chat-response-message';
-      let countBefore = 0;
-      try {
-        countBefore = await page.locator(assistantSel).count();
-      } catch (e) {}
 
       // Wait for the new assistant message to appear (count increases)
       const appearDeadline = Date.now() + 60000;
@@ -229,10 +244,25 @@ export class QwenAutomationController {
         await page.waitForTimeout(800);
       }
 
-      // Poll the LAST assistant message text until it stabilizes (streaming complete)
+      // Poll the LAST assistant message text until the response is TRULY complete.
+      // Qwen pauses mid-generation (long HTML/code), so a short stability window
+      // captures truncated output. Two independent completion signals:
+      //   1. Stop button disappears (generation ended) - primary
+      //   2. Text stable for a LONG window (30s) - backup for responses without stop button
       let lastText = '';
       let stableRounds = 0;
-      const streamDeadline = Date.now() + 120000;
+      let sawStopButton = false;
+      const streamDeadline = Date.now() + 240000; // up to 4 min for long code
+      let generatedSome = false;
+
+      // Qwen stop/regenerate button selectors (shown while the model is generating)
+      const stopSelectors = [
+        'button[aria-label*="stop" i]',
+        'button[aria-label*="Stop" i]',
+        'button[class*="stop" i]',
+        'button[data-testid*="stop"]'
+      ];
+
       while (Date.now() < streamDeadline) {
         let current = '';
         try {
@@ -242,20 +272,53 @@ export class QwenAutomationController {
           }
         } catch (e) {}
 
+        if (current.length > 0) generatedSome = true;
+
         if (current.length > lastText.length) {
           const newChunk = current.slice(lastText.length);
           lastText = current;
           stableRounds = 0;
           if (onToken) onToken(newChunk, current);
-        } else if (current === lastText && current.length > 0) {
-          stableRounds += 1;
-          if (stableRounds >= 6) break; // ~3s stable => done
+        }
+
+        // Check if generation is still in progress (stop button present)
+        let stopVisible = false;
+        for (const sel of stopSelectors) {
+          try {
+            if (await page.locator(sel).first().isVisible().catch(() => false)) {
+              stopVisible = true;
+              break;
+            }
+          } catch (e) {}
+        }
+        if (stopVisible) {
+          sawStopButton = true;
+          stableRounds = 0; // still generating - reset stability
+        } else {
+          // No stop button visible
+          if (generatedSome && sawStopButton) {
+            // We SAW generation and now it's done => complete
+            break;
+          }
+          // Never saw a stop button: use long stability window as backup
+          if (current === lastText && current.length > 0) {
+            stableRounds += 1;
+            if (stableRounds >= 60) break; // ~30s stable => done
+          } else {
+            stableRounds = 0;
+          }
         }
 
         await page.waitForTimeout(500);
       }
 
       let cleanResponse = lastText.trim();
+
+      // Do NOT append marker text to the response - any injected text becomes part
+      // of the extracted code and can fool integrity checks (e.g. a "</html>"
+      // substring inside the marker text). Truncation is detected structurally in
+      // server.js (missing closing tags), not by annotating the payload.
+
       this.lastRequestTime = Date.now();
       return cleanResponse;
     });

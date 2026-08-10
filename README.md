@@ -1,5 +1,8 @@
 # Vibe GPT Studio 🎨🤖
 
+> **v1.1.0** — fixes a truncated-HTML false-positive in the integrity verifier
+> and a Qwen composer-selector collision. See [CHANGELOG.md](./CHANGELOG.md).
+
 **Vibe-code in a visual chat IDE** — powered by your **own web-based ChatGPT and Qwen accounts** (no API keys, no billing, no limits). A desktop Electron app + browser app that talks to chatgpt.com and chat.qwen.ai through headless automation and streams the answers into a code-editing workspace.
 
 ---

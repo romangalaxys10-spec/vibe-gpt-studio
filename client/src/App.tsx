@@ -591,7 +591,10 @@ export default function App() {
               </div>
 
               <div style={{ fontSize: '14px', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
-                {msg.text}
+                {/* For vibe_code mode with extracted code, skip raw text display - code blocks are shown below with preview buttons */}
+                {!((msg.extractedCode && msg.extractedCode.length > 0) && msg.mode === 'vibe_code') && (
+                  <>{msg.text}</>
+                )}
               </div>
 
               {/* EXTRACTED CODE AUTO-EXECUTE BUTTONS */}
