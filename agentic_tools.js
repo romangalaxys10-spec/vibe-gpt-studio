@@ -140,8 +140,9 @@ export class AgenticToolExecutor {
         const sessionType = process.env.XDG_SESSION_TYPE || '';
         const isWayland = sessionType === 'wayland' || !!process.env.WAYLAND_DISPLAY;
         const screenshotsDir = path.join(os.default.homedir(), 'Pictures', 'Screenshots');
+        const EXT_NAME = 'org.gnome.Shell.Extensions.ScreenshotHelper';
+        const EXT_PATH = '/org/gnome/Shell/Extensions/ScreenshotHelper';
 
-        // helper: snapshot the newest screenshot file
         const newestIn = (dir) => fs.existsSync(dir)
           ? fs.readdirSync(dir).filter(f => f.endsWith('.png'))
               .map(f => ({ f, mtime: fs.statSync(path.join(dir, f)).mtimeMs }))
@@ -150,13 +151,34 @@ export class AgenticToolExecutor {
 
         try {
           if (isWayland) {
-            // GNOME 50 / Wayland: X11 tools (import/scrot) capture BLACK frames.
-            // The xdg-desktop-portal Screenshot API is the only headless path,
-            // but GNOME 50 forces INTERACTIVE consent for non-flatpak callers —
-            // the non-interactive call returns but never writes a file.
-            // Strategy: trigger the portal (interactive=true opens GNOME's UI),
-            // the user clicks once to confirm, the file lands in
-            // ~/Pictures/Screenshots/ — we detect + copy it.
+            // PATH 1 (preferred, fully headless): the screenshot_helper GNOME
+            // Shell extension runs INSIDE the compositor and uses Shell.Screenshot
+            // directly — no portal, no consent dialog, no X11. Requires a one-time
+            // install + GNOME session restart to load (GNOME 50 does not pick up
+            // new extensions mid-session). Once loaded, exposes a DBus method.
+            try {
+              const ping = await execPromise(
+                `gdbus call --session --dest ${EXT_NAME} --object-path ${EXT_PATH} --method ${EXT_NAME}.Ping`,
+                { timeout: 2000 }
+              );
+              if (ping.stdout && ping.stdout.includes('pong')) {
+                // Extension is live — capture synchronously, no dialog.
+                const cap = await execPromise(
+                  `gdbus call --session --dest ${EXT_NAME} --object-path ${EXT_PATH} --method ${EXT_NAME}.Capture "${shotPath}"`,
+                  { timeout: 8000 }
+                );
+                if (cap.stdout && cap.stdout.includes('true')) {
+                  return { ok: true, screenshotUrl: 'http://localhost:3099/screenshot.png', source: 'gnome-extension-headless' };
+                }
+              }
+            } catch (e) {
+              // extension not loaded yet (needs session restart) — fall through
+            }
+
+            // PATH 2 (fallback, works now but needs one click): trigger the
+            // xdg-desktop-portal Screenshot interactively. GNOME 50 forces a
+            // consent dialog for non-flatpak callers. After the user clicks
+            // "Share", the file lands in ~/Pictures/Screenshots/.
             const before = newestIn(screenshotsDir);
             try {
               await execPromise(
@@ -164,7 +186,6 @@ export class AgenticToolExecutor {
                 { timeout: 4000 }
               );
             } catch (e) {}
-            // poll up to 30s for the user to confirm + the file to appear
             let captured = null;
             for (let i = 0; i < 60; i++) {
               await new Promise(r => setTimeout(r, 500));
@@ -180,7 +201,7 @@ export class AgenticToolExecutor {
             }
             return {
               ok: false,
-              error: 'GNOME 50 / Wayland requires interactive consent for screenshots. A confirmation dialog should have appeared — click "Share" to capture. If no dialog appeared, press Print Screen manually, then re-run; the tool will pick up the newest file in ~/Pictures/Screenshots/. Headless/non-interactive capture is blocked by GNOME 50 security policy.'
+              error: 'GNOME 50/Wayland screenshot blocked. For FULLY HEADLESS capture (no dialog), log out and back in once to load the screenshot_helper extension (already installed). For capture NOW, approve the GNOME "Share" dialog when it appears, or press Print Screen. X11 tools produce black frames on Wayland by design.'
             };
           }
           // X11 path

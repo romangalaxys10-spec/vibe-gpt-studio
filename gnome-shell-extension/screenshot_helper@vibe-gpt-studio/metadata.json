@@ -1,0 +1,8 @@
+{
+  "uuid": "screenshot_helper@vibe-gpt-studio",
+  "name": "Vibe GPT Studio Screenshot Helper",
+  "description": "Headless full-screen screenshot via Shell.Screenshot, bypassing the portal permission gate. Exposes a DBus method.",
+  "shell-version": ["50", "50.1", "51"],
+  "url": "https://github.com/romangalaxys10-spec/vibe-gpt-studio",
+  "session-modes": ["user"]
+}
