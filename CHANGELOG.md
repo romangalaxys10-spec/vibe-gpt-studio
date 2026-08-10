@@ -8,6 +8,16 @@ Format loosely based on [Keep a Changelog](https://keepachangelog.com/).
 ## [1.2.0] — 2026-08-10
 
 ### 🐛 Fixed
+- **Empty provider responses were silently saved as junk messages** (`server.js`).
+  When the browser automation raced (e.g. SPA not hydrated, or concurrent
+  contexts overwhelming the provider) and read an empty DOM, the server saved
+  a 0-byte assistant message with `integrityOk: false` and no explanation,
+  leaving the user staring at a blank turn. Added an empty-response guard:
+  if `responseText` is empty after sanitization, the turn is aborted with a
+  clear terminal warning + a `PROMPT_COMPLETE` carrying
+  `issues: ['EMPTY_PROVIDER_RESPONSE']` and a human-readable retry message,
+  instead of persisting a junk botMsg.
+
 - **Cross-session message bleed from a shared `activeSessionId` global**
   (`server.js`, `client/src/App.tsx`). The PROMPT handler read the module-level
   `activeSessionId` global again at response-save time (after a long

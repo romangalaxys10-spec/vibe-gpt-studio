@@ -237,6 +237,27 @@ ${prompt}`;
           // Sanitize final response text
           responseText = sanitizeOutput(responseText);
 
+          // Empty-response guard: if the provider returned nothing usable, fail
+          // loudly instead of silently saving a 0-byte junk assistant message.
+          // This happens when the browser automation races (e.g. SPA not hydrated,
+          // concurrent contexts overwhelming the provider) and read an empty DOM.
+          if (!responseText || responseText.trim().length === 0) {
+            const errMsg = `Provider ${provider} returned an empty response (raw bytes: ${rawResponse.length}). The automation may have raced with page hydration, or the conversation context was busy. Please retry.`;
+            console.error('[VIBE] Empty provider response — aborting turn to avoid junk message:', errMsg);
+            broadcast({ type: 'TERMINAL_OUTPUT', output: `\n⚠️ ${errMsg}\n` });
+            broadcast({
+              type: 'PROMPT_COMPLETE',
+              sessionId: originSessionId,
+              response: `⚠️ ${errMsg}`,
+              extractedCode: [],
+              mode,
+              verification: { provider, integrityOk: false, issues: ['EMPTY_PROVIDER_RESPONSE'], rawLength: rawResponse.length },
+              sessions: getAllSessions()
+            });
+            broadcast({ type: 'STATUS', status: 'idle', sessionId: originSessionId });
+            return;
+          }
+
           // ============================================================
           // UNIFIED CODE EXTRACTION - HANDLES CHATGPT (fences) + QWEN (raw)
           // ============================================================
