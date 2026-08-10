@@ -8,6 +8,31 @@ Format loosely based on [Keep a Changelog](https://keepachangelog.com/).
 ## [1.1.0] — 2026-08-10
 
 ### 🐛 Fixed
+- **Auto-continue recovery leaked the provider's ack text as a ghost assistant
+  message** (`server.js`). The internal "continue the truncated code" follow-up
+  prompt broadcast its response via `STREAM_TOKEN`, which the client rendered as
+  a visible turn — most visibly as a junk `"Ready."` message between real turns.
+  The continue-callback now no-ops on the stream (the continuation is an
+  internal merge, never a user-visible turn).
+
+- **Auto-continue only ran for Qwen, never ChatGPT** (`server.js`). The gate
+  was hard-coded `provider === 'qwen'`, so truncated ChatGPT responses stayed
+  broken with no recovery attempt. Gate is now provider-agnostic — any provider
+  that returns `missing-closing-html` / `missing-closing-tags` triggers the
+  silent continue-merge.
+
+- **ChatGPT mixed prose into the code block** (`server.js`). The model emitted
+  its code, then continued writing commentary ("Key Design Features
+  Implemented:…", "How to use:…"), then a stray `</html>`, leaving the document
+  without `</body>`. Two mitigations:
+  1. Strengthened the `[VIBE CODING MODE]` `CODE_GUARD` to explicitly forbid
+     prose / explanations / commentary and require the file to end with
+     `</body></html>`.
+  2. Added prose-leak truncation in `extractGeneratedCode` (block 3d): if
+     `</html>` appears, everything after the FIRST occurrence is discarded, so
+     trailing commentary cannot corrupt the document.
+
+
 - **`/preview?session=` route ignored the session id and served a stale static
   file** (`server.js`). The route read `client/dist/preview.html` (last written
   by the `SERVE_AND_OPEN_FIREFOX` agentic action) regardless of the `?session=`

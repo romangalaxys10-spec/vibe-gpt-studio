@@ -141,7 +141,7 @@ wss.on('connection', (ws) => {
         broadcast({ type: 'STATUS', status: 'thinking' });
 
         try {
-          const CODE_GUARD = "\n\nCRITICAL INSTRUCTION: DO NOT GENERATE IMAGES, MOCKUPS, OR CALL DALL-E. YOU ARE A PURE CODE GENERATOR. Output ONLY valid, complete, production-ready source code enclosed inside standard markdown code blocks (```html, ```css, ```js, etc.).";
+          const CODE_GUARD = "\n\nCRITICAL INSTRUCTION: DO NOT GENERATE IMAGES, MOCKUPS, OR CALL DALL-E. YOU ARE A PURE CODE GENERATOR. Output ONLY valid, complete, production-ready source code enclosed inside standard markdown code blocks (```html, ```css, ```js, etc.). NO prose, NO explanations, NO commentary, NO 'Key features' lists, NO 'How to use' text — ONLY the code block, nothing before or after it. The file MUST end with </body></html>.";
 
           let fullPrompt = prompt;
           if (mode === 'vibe_code') {
@@ -281,6 +281,17 @@ ${prompt}`;
               .replace(/\s*Build it\s*$/i, '')
               .trim();
 
+            // 3d. Prose-leak truncation.
+            // Some providers (notably ChatGPT) emit the code, then CONTINUE writing
+            // prose ("Key Design Features Implemented:…", "How to use:…"), then a
+            // stray </html>. Keep only up to the FIRST </html>; everything after is
+            // commentary that does not belong in the document. If the prose appeared
+            // BEFORE any closing tag, the truncation detector below will catch it.
+            const firstCloseHtml = code.search(/<\/html\s*>/i);
+            if (firstCloseHtml >= 0) {
+              code = code.slice(0, firstCloseHtml + '</html>'.length).trimEnd();
+            }
+
             // 4. Detect truncation - STRUCTURAL, not lexical.
             // A response is only complete when the closing tags are the LAST tokens,
             // not merely present somewhere in the text.
@@ -355,15 +366,21 @@ ${prompt}`;
             });
 
             // === AUTO-CONTINUE: ask the provider to complete the truncated code ===
-            // Qwen pauses mid-generation; a short follow-up "continue" prompt makes it
-            // resume and emit the missing tail (closing tags, rest of the file).
-            if (provider === 'qwen' && (verification.truncationReason === 'missing-closing-html' || verification.truncationReason === 'missing-closing-tags')) {
-              console.warn("[VIBE] Requesting Qwen to continue the truncated HTML...");
+            // Any provider (chatgpt OR qwen) can stop mid-generation; a short follow-up
+            // "continue" prompt makes it resume and emit the missing tail (closing tags,
+            // rest of the file). The continue-prompt response is an INTERNAL recovery
+            // operation — it must NOT be streamed to the client (doing so would create a
+            // ghost "Ready." / ack message visible as a fake assistant turn).
+            if (verification.truncationReason === 'missing-closing-html' || verification.truncationReason === 'missing-closing-tags') {
+              console.warn(`[VIBE] Requesting ${provider} to continue the truncated HTML...`);
               try {
                 const continueResp = await controller.sendPrompt(
                   "[CONTINUE OUTPUT] You were generating an HTML file but stopped before the closing </html> tag. Continue EXACTLY where you left off and complete the entire rest of the file, ending with </html>. Output ONLY the remaining code, no explanations, no markdown fences.",
                   activeSession.headful,
-                  (token, fullText) => { broadcast({ type: 'STREAM_TOKEN', token, text: sanitizeOutput(fullText) }); }
+                  // Deliberately NO STREAM_TOKEN broadcast here — the continuation is an
+                  // internal merge, not a visible turn. Streaming it made the client render
+                  // the provider's ack text ("Ready.", "Here is the rest…") as a junk message.
+                  () => {}
                 );
                 const continueSanitized = sanitizeOutput(continueResp);
                 const continueExtraction = extractGeneratedCode(continueSanitized);
