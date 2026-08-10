@@ -14,10 +14,18 @@
 // Uses Node's built-in fetch (Node 18+) — no external HTTP dependency.
 
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
-const DEFAULT_MODEL = process.env.OLLAMA_ORCHESTRATOR_MODEL || 'qwen2.5-coder:7b';
+
+// Two-role model defaults, chosen by head-to-head benchmark:
+//   - PLANNER: qwen2.5-coder:1.5b — 58 tok/s, valid JSON plans, 986MB RAM
+//   - GENERATOR: qwen2.5-coder:7b — proper PHP (htmlspecialchars + filter_var),
+//     no hallucinated deps; 17 tok/s but quality matters for code
+const DEFAULT_PLANNER_MODEL = process.env.OLLAMA_PLANNER_MODEL || 'qwen2.5-coder:1.5b';
+const DEFAULT_GENERATOR_MODEL = process.env.OLLAMA_GENERATOR_MODEL || 'qwen2.5-coder:7b';
 
 class OllamaService {
-  constructor(model = DEFAULT_MODEL) {
+  // model is the default role for generate()/generateStream(). Override per-call
+  // by passing { model } in options.
+  constructor(model = DEFAULT_PLANNER_MODEL) {
     this.model = model;
   }
 
@@ -35,10 +43,11 @@ class OllamaService {
   }
 
   // Generate a completion (non-streaming). Returns the full response text.
-  // Options: { temperature, num_predict, system, format (json|text), stop }
+  // Options: { temperature, num_predict, system, format (json|text), stop,
+  //            model (override the default model for this call) }
   async generate(prompt, options = {}) {
     const body = {
-      model: this.model,
+      model: options.model || this.model,
       prompt,
       stream: false,
       options: {
@@ -116,4 +125,4 @@ class OllamaService {
 }
 
 export const ollama = new OllamaService();
-export { OllamaService };
+export { OllamaService, DEFAULT_PLANNER_MODEL, DEFAULT_GENERATOR_MODEL };

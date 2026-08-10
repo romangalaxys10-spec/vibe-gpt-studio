@@ -19,8 +19,14 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { ollama } from './ollama_service.js';
+import { ollama, DEFAULT_PLANNER_MODEL, DEFAULT_GENERATOR_MODEL } from './ollama_service.js';
 import { extractFiles, safeJoinPath, buildFileTree } from './multifile_extractor.js';
+
+// Role-based model selection (settable via env for experimentation):
+//   - PLANNER: small/fast (default 1.5b, ~58 tok/s) — planning is lightweight JSON
+//   - GENERATOR: larger/better (default 7b) — code quality matters; 1.5b hallucinates deps
+const PLANNER_MODEL = process.env.OLLAMA_PLANNER_MODEL || DEFAULT_PLANNER_MODEL;
+const GENERATOR_MODEL = process.env.OLLAMA_GENERATOR_MODEL || DEFAULT_GENERATOR_MODEL;
 
 const PROJECTS_ROOT = path.join(os.homedir(), '.vibe-gpt-studio', 'projects');
 
@@ -64,6 +70,7 @@ Rules:
 - Keep it minimal: 3-8 files typically. Avoid over-engineering.`;
 
     const result = await ollama.generate(planPrompt, {
+      model: PLANNER_MODEL,   // fast/small (1.5b) — planning is lightweight structured JSON
       temperature: 0.2,
       num_predict: 800,
       format: 'json', // forces valid JSON
@@ -114,8 +121,8 @@ Rules:
         if (workerSendFn) {
           responseText = await workerSendFn(prompt, { file: f, plan });
         } else {
-          // default: local orchestrator generates the file itself
-          const r = await ollama.generate(prompt, { temperature: 0.2, num_predict: 1500 });
+          // default: local generator (7b — better code quality; 1.5b hallucinates deps)
+          const r = await ollama.generate(prompt, { model: GENERATOR_MODEL, temperature: 0.2, num_predict: 1500 });
           responseText = r.text;
         }
       } catch (e) {
