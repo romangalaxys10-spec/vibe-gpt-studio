@@ -108,7 +108,16 @@ wss.on('connection', (ws) => {
 
       if (msg.type === 'PROMPT') {
         const { prompt, mode } = msg;
-        let s = getSessionById(activeSessionId);
+        // CONCURRENCY FIX: snapshot the originating session id ONCE at entry and
+        // use this const throughout the async closure. Previously this handler read
+        // the module-level `activeSessionId` global again at response-save time
+        // (after a long `await sendPrompt`), so a concurrent CREATE/SELECT/DELETE
+        // from another client could re-point the global and the response landed in
+        // the WRONG session (cross-session message bleed). Prefer an explicit
+        // msg.sessionId from the client; fall back to the global only for legacy
+        // callers. Never mutate the global from inside this handler.
+        const originSessionId = msg.sessionId || activeSessionId;
+        let s = getSessionById(originSessionId);
         if (!s) {
           s = {
             id: `session_${Date.now()}`,
@@ -119,7 +128,9 @@ wss.on('connection', (ws) => {
             updatedAt: new Date().toISOString(),
             messages: []
           };
-          activeSessionId = s.id;
+          saveSession(s);
+          // Do NOT mutate the global activeSessionId here — that is UI focus state
+          // belonging to whichever tab is open, not to this async request.
         }
 
         const userMsg = {
@@ -145,7 +156,10 @@ wss.on('connection', (ws) => {
 
           let fullPrompt = prompt;
           if (mode === 'vibe_code') {
-            fullPrompt = `[VIBE CODING MODE - Pure Code Output Required]\n${prompt}${CODE_GUARD}`;
+            // Tools are available in vibe_code mode too, but CODE_GUARD stays dominant:
+            // if the user asks for code, the model emits pure code; if the user asks
+            // the model to DO something on the system, it may emit a TOOL: call instead.
+            fullPrompt = `[VIBE CODING MODE - Pure Code Output Required]\n${prompt}${CODE_GUARD}\n\n${agenticTools.getToolDefinitions()}\nIf the user asks you to perform a desktop/terminal/file action (not generate code), respond with a single TOOL: invocation line. Otherwise, output pure code only.`;
           } else if (mode === 'agent') {
             let localSysInfo = '';
             try {
@@ -208,9 +222,13 @@ ${prompt}`;
 
           const controller = provider === 'qwen' ? qwen : chatgpt;
 
-          let responseText = await controller.sendPrompt(fullPrompt, activeSession.headful, (token, fullText) => {
+          // Per-session headful flag (not the static global). Falls back to the
+          // global default for sessions that never set one.
+          const sessionHeadful = (s && typeof s.headful === 'boolean') ? s.headful : activeSession.headful;
+
+          let responseText = await controller.sendPrompt(fullPrompt, sessionHeadful, (token, fullText) => {
             let cleanStream = sanitizeOutput(fullText);
-            broadcast({ type: 'STREAM_TOKEN', token, text: cleanStream });
+            broadcast({ type: 'STREAM_TOKEN', token, text: cleanStream, sessionId: originSessionId });
           });
 
           // === RESPONSE INTEGRITY VERIFICATION ===
@@ -376,7 +394,7 @@ ${prompt}`;
               try {
                 const continueResp = await controller.sendPrompt(
                   "[CONTINUE OUTPUT] You were generating an HTML file but stopped before the closing </html> tag. Continue EXACTLY where you left off and complete the entire rest of the file, ending with </html>. Output ONLY the remaining code, no explanations, no markdown fences.",
-                  activeSession.headful,
+                  sessionHeadful,
                   // Deliberately NO STREAM_TOKEN broadcast here — the continuation is an
                   // internal merge, not a visible turn. Streaming it made the client render
                   // the provider's ack text ("Ready.", "Here is the rest…") as a junk message.
@@ -492,7 +510,7 @@ ${prompt}`;
             verification
           };
 
-          const activeS = getSessionById(activeSessionId);
+          const activeS = getSessionById(originSessionId);
           if (activeS) {
             activeS.messages.push(botMsg);
             saveSession(activeS);
@@ -500,13 +518,14 @@ ${prompt}`;
 
           broadcast({
             type: 'PROMPT_COMPLETE',
+            sessionId: originSessionId,
             response: responseText,
             extractedCode,
             mode,
             verification,
             sessions: getAllSessions()
           });
-          broadcast({ type: 'STATUS', status: 'idle' });
+          broadcast({ type: 'STATUS', status: 'idle', sessionId: originSessionId });
         } catch (err) {
           console.error('[Server Error]', err);
           broadcast({ type: 'ERROR', error: err.message });
@@ -658,6 +677,17 @@ app.get('/preview', (req, res) => {
 });
 
 app.get('/api/sessions', (req, res) => res.json(getAllSessions()));
+// Static route for desktop screenshots captured by the take_screenshot tool.
+// The tool writes to client/dist/screenshot.png and returns this URL — without
+// a route here, the URL would 404.
+app.get('/screenshot.png', (req, res) => {
+  const shotPath = path.join(process.cwd(), 'client', 'dist', 'screenshot.png');
+  if (fs.existsSync(shotPath)) {
+    res.type('png').sendFile(shotPath);
+  } else {
+    res.status(404).type('png').send(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64'));
+  }
+});
 app.get('/api/sessions/:id', (req, res) => res.json(getSessionById(req.params.id)));
 app.post('/api/sessions', (req, res) => res.json(saveSession(req.body)));
 app.delete('/api/sessions/:id', (req, res) => res.json({ ok: deleteSession(req.params.id) }));

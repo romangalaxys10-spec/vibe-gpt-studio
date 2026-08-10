@@ -64,6 +64,19 @@ export class AgenticToolExecutor {
               return { ok: true, message: `Launched and focused ${matchedKey} on desktop.` };
             }
           } else {
+            // Unknown app — verify the binary exists before claiming success.
+            // Returning ok:true without checking misled callers (and users) when the
+            // app name was misspelled or not installed.
+            const candidateBinaries = [appName, appName.toLowerCase()];
+            const checks = candidateBinaries.map(b => {
+              const lookupPaths = ['/usr/bin', '/usr/local/bin', '/snap/bin', `${process.env.HOME}/.local/bin`];
+              return lookupPaths.some(p => fs.existsSync(`${p}/${b}`));
+            });
+            const whichCheck = await execPromise(`command -v ${candidateBinaries.join(' ')} 2>/dev/null || which ${candidateBinaries.join(' ')} 2>/dev/null`).then(r => r.stdout.trim().length > 0).catch(() => false);
+            const exists = checks.some(Boolean) || whichCheck;
+            if (!exists) {
+              return { ok: false, error: `Application "${appName}" not found in PATH. Install it or check the name.` };
+            }
             const fullCmd = args ? `${appName} ${args} &` : `${appName} &`;
             exec(fullCmd, execOpts);
             return { ok: true, message: `Launched ${appName} on desktop.` };
@@ -97,11 +110,26 @@ export class AgenticToolExecutor {
       navigate_url: async ({ url, browser }) => {
         return new Promise((resolve) => {
           const targetBrowser = browser || 'firefox';
-          const cmd = targetBrowser === 'chrome' ? `google-chrome-stable "${url}" & || google-chrome "${url}" &` : `firefox "${url}" &`;
-          exec(cmd, (err) => {
-            if (err) exec(`google-chrome-stable "${url}" &`);
-            resolve({ ok: true, message: `Opened ${url} in ${targetBrowser}` });
-          });
+          // NOTE: do NOT chain with "& ||" — that is invalid shell syntax (background
+          // operator immediately followed by OR). Use a single foreground-or-background
+          // command per browser and rely on the callback to detect failure.
+          const launchers = targetBrowser === 'chrome'
+            ? ['google-chrome-stable', 'google-chrome', 'chromium', 'chromium-browser']
+            : ['firefox'];
+          const tried = [];
+          let idx = 0;
+          const tryNext = () => {
+            if (idx >= launchers.length) {
+              return resolve({ ok: false, error: `No ${targetBrowser} binary found. Tried: ${launchers.join(', ')}` });
+            }
+            const bin = launchers[idx++];
+            tried.push(bin);
+            exec(`${bin} "${url}" &`, (err) => {
+              if (err) tryNext();
+              else resolve({ ok: true, message: `Opened ${url} in ${bin}` });
+            });
+          };
+          tryNext();
         });
       },
 
@@ -138,27 +166,32 @@ export class AgenticToolExecutor {
   }
 
   getToolDefinitions() {
-    return `
-Available Agentic Action Tools:
-1. \`TOOL: open_application {"appName": "chrome"}\` - Open any desktop app (chrome, firefox, vscode, terminal).
-2. \`TOOL: exec_command {"command": "npm test"}\` - Run bash commands on local terminal.
-3. \`TOOL: navigate_url {"url": "https://google.com", "browser": "chrome"}\` - Open URL in browser.
-4. \`TOOL: write_file {"filePath": "src/app.js", "content": "..."}\` - Write file content.
-5. \`TOOL: read_file {"filePath": "package.json"}\` - Read file content.
-6. \`TOOL: take_screenshot {}\` - Take Linux desktop screenshot.
-7. \`TOOL: click_mouse {"x": 500, "y": 300}\` - Click desktop mouse coordinates.
-8. \`TOOL: type_keyboard {"text": "hello", "pressEnter": true}\` - Type keyboard input.
+    return `You have access to the following LOCAL EXECUTION TOOLS. When the user asks you to DO something on the system (run a command, open an app, read/write a file, take a screenshot, control the mouse/keyboard, open a URL), respond with EXACTLY ONE tool invocation line in this format and nothing else:
 
-To invoke any tool, output a line starting with: \`TOOL: <tool_name> <json_args>\`
-Or output a standard shell code block:
-\`\`\`bash
-google-chrome-stable &
-\`\`\`
-`;
+TOOL: <tool_name> <json_arguments>
+
+Tool catalog:
+- TOOL: exec_command {"command":"ls -la","cwd":"/tmp"}              — run a bash command, return stdout
+- TOOL: open_application {"appName":"firefox"}                       — open/focus a desktop app (firefox, chrome, discord, whatsie, code)
+- TOOL: navigate_url {"url":"https://example.com","browser":"firefox"} — open a URL in a browser
+- TOOL: read_file {"filePath":"/etc/hostname"}                       — read a file's contents
+- TOOL: write_file {"filePath":"/tmp/x.txt","content":"hello"}       — write content to a file
+- TOOL: take_screenshot {}                                            — capture the desktop to screenshot.png
+- TOOL: click_mouse {"x":500,"y":300}                                 — click at screen coordinates
+- TOOL: type_keyboard {"text":"hello","pressEnter":true}             — type text into the focused window
+
+RULES:
+- Output the TOOL: line on its OWN line, with valid JSON (double-quoted keys).
+- Do NOT wrap tool calls in markdown code fences. Do NOT add prose around them.
+- If the user wants CODE (not a system action), output pure code as usual — no TOOL: line.
+- Emit only ONE tool call per turn. The host executes it and returns the result.`;
   }
 
   async parseAndExecuteTools(text) {
-    const regex = /TOOL:\s*(\w+)\s*(\{[\s\S]*?\})/g;
+    // Tolerant parser: matches TOOL: <name> <json> across formatting variants.
+    // Handles: single-line, multi-line JSON, leading/trailing whitespace, and
+    // tool calls wrapped in markdown fences (some providers add them anyway).
+    const regex = /TOOL:\s*([a-zA-Z_]+)\s*(\{[\s\S]*?\})/g;
     let match;
     const results = [];
 
@@ -170,6 +203,8 @@ google-chrome-stable &
           console.log(`[Agentic Tool Exec] Running ${toolName}...`, args);
           const res = await this.tools[toolName](args);
           results.push({ tool: toolName, args, result: res });
+        } else {
+          results.push({ tool: toolName, error: `Unknown tool: ${toolName}` });
         }
       } catch (e) {
         results.push({ tool: toolName, error: `Invalid JSON args: ${e.message}` });

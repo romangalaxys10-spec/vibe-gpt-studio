@@ -130,10 +130,15 @@ export default function App() {
       }
 
       if (data.type === 'STATUS') {
+        // Ignore status from other sessions — only the focused session should
+        // drive the thinking spinner (concurrent prompts no longer thrash the UI).
+        if (data.sessionId && data.sessionId !== activeSessionId) return;
         setIsThinking(data.status === 'thinking');
       }
 
       if (data.type === 'STREAM_TOKEN') {
+        // Session-scoped: ignore tokens from a different session's in-flight prompt.
+        if (data.sessionId && data.sessionId !== activeSessionId) return;
         setMessages(prev => {
           const last = prev[prev.length - 1];
           if (last && last.sender === 'chatgpt' && last.id === 'streaming') {
@@ -151,11 +156,16 @@ export default function App() {
       }
 
       if (data.type === 'PROMPT_COMPLETE') {
+        // Session-scoped: a completion from another session should refresh the
+        // session list but not overwrite THIS session's messages.
+        const isForThisSession = !data.sessionId || data.sessionId === activeSessionId;
         if (data.sessions) {
           setSessions(data.sessions);
-          const currentS = data.sessions.find((x: Session) => x.id === activeSessionId);
-          if (currentS) setMessages(currentS.messages || []);
-        } else {
+          if (isForThisSession) {
+            const currentS = data.sessions.find((x: Session) => x.id === activeSessionId);
+            if (currentS) setMessages(currentS.messages || []);
+          }
+        } else if (isForThisSession) {
           setMessages(prev => {
             const filtered = prev.filter(m => m.id !== 'streaming');
             return [...filtered, {
@@ -168,7 +178,7 @@ export default function App() {
             }];
           });
         }
-        confetti({ particleCount: 40, spread: 60, origin: { y: 0.8 } });
+        if (isForThisSession) confetti({ particleCount: 40, spread: 60, origin: { y: 0.8 } });
       }
 
       if (data.type === 'TERMINAL_OUTPUT') {
@@ -199,7 +209,8 @@ export default function App() {
       type: 'PROMPT',
       prompt: inputPrompt,
       mode,
-      provider
+      provider,
+      sessionId: activeSessionId
     }));
 
     setInputPrompt('');

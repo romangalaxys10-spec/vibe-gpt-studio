@@ -5,6 +5,95 @@ Format loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [1.2.0] — 2026-08-10
+
+### 🐛 Fixed
+- **Cross-session message bleed from a shared `activeSessionId` global**
+  (`server.js`, `client/src/App.tsx`). The PROMPT handler read the module-level
+  `activeSessionId` global again at response-save time (after a long
+  `await sendPrompt`), so any concurrent `CREATE_SESSION` / `SELECT_SESSION` /
+  `DELETE_SESSION` from another client (e.g. another browser tab, or a parallel
+  test harness) re-pointed the global mid-flight and the assistant response was
+  pushed into the WRONG session — corrupting the user's open conversation with
+  foreign messages. Forensics confirmed via two parallel audit agents.
+
+  Fix:
+  1. Snapshot `originSessionId` once at PROMPT-handler entry (prefer
+     `msg.sessionId` from the client; fall back to the global only for legacy
+     callers).
+  2. Thread `originSessionId` through every async reference (response save,
+     broadcasts).
+  3. Tag `PROMPT_COMPLETE`, `STREAM_TOKEN`, and `STATUS` broadcasts with
+     `sessionId`.
+  4. Client now filters incoming events on `sessionId === activeSessionId`,
+     so cross-session activity no longer overwrites the focused conversation.
+  5. Client now sends `sessionId` in every PROMPT message.
+  6. Stopped mutating the global `activeSessionId` from inside the PROMPT
+     handler (UI focus state must not change because a background prompt ran).
+
+  Verified via a 3-way concurrent stress test: no foreign markers appeared in
+  any session's assistant responses.
+
+- **Per-session `headful` flag ignored** (`server.js`). The PROMPT closure read
+  `activeSession.headful` (a static global) instead of the originating
+  session's headful flag. Now uses `s.headful` with fallback to the global
+  default.
+
+### 🔧 Agentic tools overhaul (`agentic_tools.js`, `server.js`)
+
+Computer-use / terminal / browser-control layer made production-usable. The
+executor plumbing already worked; the bugs were in the tool-calling contract,
+shell construction, and mode gating.
+
+- **Tools now available in `vibe_code` mode too** (`server.js`). Previously the
+  tool catalog was injected only in `agent` mode, so users in the default
+  `vibe_code` mode could never invoke desktop/terminal/file actions. The
+  catalog is now appended in both modes (CODE_GUARD stays dominant — tools
+  activate only when the user asks for a system action, not code).
+- **Crisp tool-calling contract** (`agentic_tools.js`). Rewrote
+  `getToolDefinitions()` to give an unambiguous one-line-per-tool spec with a
+  strict `TOOL: <name> <json>` format. ChatGPT previously copied the catalog's
+  ```bash example block verbatim instead of emitting a tool call; the new
+  contract + rules ("do NOT wrap in fences, do NOT add prose") fixed that —
+  ChatGPT now emits valid `TOOL:` lines when phrased imperatively.
+- **`navigate_url` invalid shell syntax** (`agentic_tools.js`). The chrome
+  branch built `google-chrome-stable URL & || google-chrome URL &` — the
+  `& ||` sequence is a shell syntax error (background operator immediately
+  followed by OR). Replaced with a per-binary launcher ladder
+  (`google-chrome-stable` → `google-chrome` → `chromium` → `chromium-browser`)
+  that tries each in turn and reports failure if none exist.
+- **`open_application` false-success on unknown apps** (`agentic_tools.js`).
+  Returned `ok: true` before exec completed with no existence check, so
+  `open_application({appName:'nonexistent'})` claimed success. Now verifies the
+  binary exists in PATH/common locations before launching; returns
+  `ok: false, error: "Application … not found"` otherwise.
+- **Missing `/screenshot.png` route** (`server.js`). The `take_screenshot`
+  tool returns `http://localhost:3099/screenshot.png`, but no route served it
+  → 404. Added a static route serving `client/dist/screenshot.png`.
+- **Tolerant tool parser** (`agentic_tools.js`). Regex now handles multi-line
+  JSON args and tool calls wrapped in markdown fences, and reports unknown tool
+  names instead of silently dropping them.
+
+### ✅ Verified
+- Layer 1 unit suite: **8/8 tools correct behavior** (exec_command, read_file,
+  write_file, navigate_url, take_screenshot, click_mouse, type_keyboard,
+  open_application-rejects-unknown).
+- Layer 2 integration: Qwen emits `TOOL: exec_command{…}` end-to-end, executor
+  fires, command output returned. ChatGPT emits valid tool calls when phrased
+  imperatively.
+- Concurrency stress test: 3 parallel sessions, zero cross-session bleed.
+
+### ⚠️ Known limitation
+- ChatGPT is more sensitive to prompt phrasing than Qwen for the prompt-based
+  tool protocol. Imperative phrasing ("You MUST output a TOOL: line") works;
+  vague phrasing sometimes returns a status JSON. A native function-calling
+  API integration would be more robust (out of scope for this release).
+- `CREATE_SESSION` still broadcasts `SESSION_LOADED` to ALL clients (not just
+  the requester), so concurrent session creation can race. PROMPT isolation is
+  fixed; CREATE_SESSION scoping is a follow-up.
+
+---
+
 ## [1.1.0] — 2026-08-10
 
 ### 🐛 Fixed
