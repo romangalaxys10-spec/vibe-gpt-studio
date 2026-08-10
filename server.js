@@ -262,6 +262,43 @@ ${prompt}`;
             return;
           }
 
+          // Junk-ack guard: ChatGPT (when driven via web automation) sometimes
+          // refuses to follow the tool-calling protocol and returns short ack
+          // strings instead of a real answer or TOOL: line. Detect these so the
+          // user sees a clear error + gets a retry, rather than a silent fake
+          // "success" like "CHATGPT_OK".
+          const JUNK_ACK_PATTERNS = [
+            /^CHATGPT_OK$/i,
+            /^CHATGPT[-_ ]?OK/i,
+            /^{"status"\s*:\s*"(ready|ok|done|complete)"}$/i,
+            /^\s*OK\s*$/i,
+            /^\s*Done\.?\s*$/i,
+            /^\s*Ready\.?\s*$/i,
+            /^noop(\s*\{\s*\})?$/i,
+          ];
+          const trimmed = responseText.trim();
+          const isJunkAck = trimmed.length <= 40
+            && !/^TOOL:/.test(trimmed)
+            && !/```/.test(trimmed)
+            && !/<!doctype|<html|<body/i.test(trimmed)
+            && JUNK_ACK_PATTERNS.some(re => re.test(trimmed));
+          if (isJunkAck) {
+            const errMsg = `Provider ${provider} returned a junk acknowledgement (${JSON.stringify(trimmed)}) instead of performing the requested action. This happens when the web-automation context confuses the model. Please retry, or rephrase with an explicit imperative (e.g. "You MUST output a TOOL: line").`;
+            console.error('[VIBE] Junk ack response — aborting:', errMsg);
+            broadcast({ type: 'TERMINAL_OUTPUT', output: `\n⚠️ ${errMsg}\n` });
+            broadcast({
+              type: 'PROMPT_COMPLETE',
+              sessionId: originSessionId,
+              response: `⚠️ ${errMsg}`,
+              extractedCode: [],
+              mode,
+              verification: { provider, integrityOk: false, issues: ['JUNK_ACK_RESPONSE'], rawLength: rawResponse.length, junkText: trimmed },
+              sessions: getAllSessions()
+            });
+            broadcast({ type: 'STATUS', status: 'idle', sessionId: originSessionId });
+            return;
+          }
+
           // ============================================================
           // UNIFIED CODE EXTRACTION - HANDLES CHATGPT (fences) + QWEN (raw)
           // ============================================================
