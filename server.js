@@ -10,6 +10,7 @@ import fs from 'fs';
 const execPromise = util.promisify(exec);
 import { ChatGPTAutomationController, extractChatGPTCookies } from './chatgpt_service.js';
 import { QwenAutomationController, extractQwenCookies } from './qwen_service.js';
+import { DeepSeekAutomationController } from './deepseek_service.js';
 import { agenticTools } from './agentic_tools.js';
 import { Orchestrator, PROJECTS_ROOT } from './orchestrator.js';
 import { ollama } from './ollama_service.js';
@@ -23,6 +24,7 @@ const wss = new WebSocketServer({ server });
 
 const chatgpt = new ChatGPTAutomationController();
 const qwen = new QwenAutomationController();
+const deepseek = new DeepSeekAutomationController();
 
 let activeSession = {
   headful: false,
@@ -985,9 +987,13 @@ app.post('/api/ask', async (req, res) => {
   if (!prompt || typeof prompt !== 'string') {
     return res.status(400).json({ ok: false, error: 'prompt (string) required' });
   }
-  if (!['chatgpt', 'qwen'].includes(provider)) {
-    return res.status(400).json({ ok: false, error: 'provider must be "chatgpt" or "qwen"' });
+  if (!['chatgpt', 'qwen', 'deepseek'].includes(provider)) {
+    return res.status(400).json({ ok: false, error: 'provider must be "chatgpt", "qwen", or "deepseek"' });
   }
+  // DeepSeek mode mapping: /api/ask caller can pass mode='instant'|'expert'|'vision'
+  // to pick DeepSeek's model. For other providers 'mode' is the session mode label.
+  const dsMode = ['instant', 'expert', 'vision'].includes(mode) ? mode : 'instant';
+
   // Create an ephemeral session for this consult
   const sid = `ask_${Date.now()}`;
   const session = {
@@ -999,19 +1005,25 @@ app.post('/api/ask', async (req, res) => {
   broadcast({ type: 'STATUS', status: 'thinking', sessionId: originSessionId });
 
   try {
-    const controller = provider === 'qwen' ? qwen : chatgpt;
+    let controller;
+    let sendOpts = {};
+    if (provider === 'qwen') controller = qwen;
+    else if (provider === 'deepseek') { controller = deepseek; sendOpts = { mode: dsMode }; }
+    else controller = chatgpt;
     const sessionHeadful = false;
 
     // Build the prompt the same way the PROMPT handler does for the chosen mode.
     const CODE_GUARD = "\n\nCRITICAL INSTRUCTION: Output ONLY your brainstorming response. No code unless explicitly requested.";
     let fullPrompt = prompt;
+    // Only apply the brainstorm wrapper when mode IS 'brainstorm' (not when it's
+    // a DeepSeek mode like 'instant'/'expert'/'vision').
     if (mode === 'brainstorm') {
       fullPrompt = `[BRAINSTORMING MODE - consultative reasoning]\nYou are being consulted as ${provider}. Give a thoughtful, structured response with multiple perspectives, tradeoffs, and concrete recommendations.\n${prompt}${CODE_GUARD}`;
-    } else {
+    } else if (provider !== 'deepseek') {
       fullPrompt = `${prompt}${CODE_GUARD}`;
     }
 
-    let responseText = await controller.sendPrompt(fullPrompt, sessionHeadful, () => {});
+    let responseText = await controller.sendPrompt(fullPrompt, sessionHeadful, () => {}, sendOpts);
     responseText = sanitizeOutput(responseText);
 
     // Empty/junk guards (same as the WS path)
