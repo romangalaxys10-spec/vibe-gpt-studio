@@ -33,6 +33,19 @@ let activeSession = {
 
 import { getAllSessions, getSessionById, saveSession, deleteSession } from './session_manager.js';
 
+// Output Sanitizer Pipeline (Strips System Prompt Tokens & Leaks).
+// Defined at module scope so BOTH the WS PROMPT handler and the /api/ask
+// HTTP endpoint can use it.
+function sanitizeOutput(text) {
+  if (!text) return '';
+  return text
+    .replace(/^\[(VIBE CODING|AGENTIC ORCHESTRATOR) MODE[\s\S]*?\]\n?/gi, '')
+    .replace(/CRITICAL INSTRUCTION:[\s\S]*?code blocks \([^\)]*\)\./gi, '')
+    .replace(/SYSTEM NOTIFICATION:[\s\S]*?\n/gi, '')
+    .replace(/You are Vibe GPT Studio Agent[\s\S]*?USER TASK:\n/gi, '')
+    .trim();
+}
+
 let activeSessionId = null;
 
 // Ensure default session exists
@@ -212,16 +225,8 @@ ${prompt}`;
             fullPrompt = `${prompt}${CODE_GUARD}`;
           }
 
-          // Output Sanitizer Pipeline (Strips System Prompt Tokens & Leaks)
-          function sanitizeOutput(text) {
-            if (!text) return '';
-            return text
-              .replace(/^\[(VIBE CODING|AGENTIC ORCHESTRATOR) MODE[\s\S]*?\]\n?/gi, '')
-              .replace(/CRITICAL INSTRUCTION:[\s\S]*?code blocks \([^\)]*\)\./gi, '')
-              .replace(/SYSTEM NOTIFICATION:[\s\S]*?\n/gi, '')
-              .replace(/You are Vibe GPT Studio Agent[\s\S]*?USER TASK:\n/gi, '')
-              .trim();
-          }
+          // Output Sanitizer Pipeline — uses the module-level sanitizeOutput()
+          // (extracted from here so /api/ask can share it).
 
           const provider = msg.provider || 'chatgpt';
           console.log(`[Prompt Dispatcher] Executing prompt using provider: ${provider}`);
@@ -962,6 +967,77 @@ app.get('/screenshot.png', (req, res) => {
 app.get('/api/sessions/:id', (req, res) => res.json(getSessionById(req.params.id)));
 app.post('/api/sessions', (req, res) => res.json(saveSession(req.body)));
 app.delete('/api/sessions/:id', (req, res) => res.json({ ok: deleteSession(req.params.id) }));
+
+// CLI-friendly one-shot prompt endpoint. Used by the brainstorm-qwen /
+// brainstorm-chatgpt skills (and any external script) to consult a provider
+// without speaking the full WebSocket protocol.
+//
+// POST /api/ask
+//   { "prompt": "...", "provider": "qwen"|"chatgpt", "mode": "brainstorm"|... }
+// Returns: { "ok": true, "response": "...", "sessionId": "..." } on success,
+//          { "ok": false, "error": "..." } on failure.
+//
+// Creates an ephemeral session, dispatches the prompt through the same PROMPT
+// handler logic the WS uses (sanitize, verify, auto-continue), and returns the
+// final assistant text. No streaming — caller waits for the complete response.
+app.post('/api/ask', async (req, res) => {
+  const { prompt, provider = 'chatgpt', mode = 'brainstorm' } = req.body || {};
+  if (!prompt || typeof prompt !== 'string') {
+    return res.status(400).json({ ok: false, error: 'prompt (string) required' });
+  }
+  if (!['chatgpt', 'qwen'].includes(provider)) {
+    return res.status(400).json({ ok: false, error: 'provider must be "chatgpt" or "qwen"' });
+  }
+  // Create an ephemeral session for this consult
+  const sid = `ask_${Date.now()}`;
+  const session = {
+    id: sid, title: `consult-${provider}-${prompt.slice(0,20)}`, mode, archived: false,
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), messages: []
+  };
+  saveSession(session);
+  const originSessionId = sid;
+  broadcast({ type: 'STATUS', status: 'thinking', sessionId: originSessionId });
+
+  try {
+    const controller = provider === 'qwen' ? qwen : chatgpt;
+    const sessionHeadful = false;
+
+    // Build the prompt the same way the PROMPT handler does for the chosen mode.
+    const CODE_GUARD = "\n\nCRITICAL INSTRUCTION: Output ONLY your brainstorming response. No code unless explicitly requested.";
+    let fullPrompt = prompt;
+    if (mode === 'brainstorm') {
+      fullPrompt = `[BRAINSTORMING MODE - consultative reasoning]\nYou are being consulted as ${provider}. Give a thoughtful, structured response with multiple perspectives, tradeoffs, and concrete recommendations.\n${prompt}${CODE_GUARD}`;
+    } else {
+      fullPrompt = `${prompt}${CODE_GUARD}`;
+    }
+
+    let responseText = await controller.sendPrompt(fullPrompt, sessionHeadful, () => {});
+    responseText = sanitizeOutput(responseText);
+
+    // Empty/junk guards (same as the WS path)
+    if (!responseText || responseText.trim().length === 0) {
+      return res.json({ ok: false, error: 'Provider returned an empty response. Retry or check quota/login.', sessionId: sid });
+    }
+    const trimmed = responseText.trim();
+    const isJunkAck = trimmed.length <= 40
+      && !/```/.test(trimmed)
+      && /^(CHATGPT_OK|{"status"\s*:\s*"(ready|ok|done)"}$|OK|Done\.?|Ready\.?|noop)/i.test(trimmed);
+    if (isJunkAck) {
+      return res.json({ ok: false, error: `Provider returned a junk acknowledgement (${JSON.stringify(trimmed)}). Retry or rephrase.`, sessionId: sid });
+    }
+
+    // Save and return
+    session.messages.push({ id: Date.now().toString(), sender: 'user', text: prompt, mode, timestamp: new Date().toLocaleTimeString() });
+    session.messages.push({ id: (Date.now()+1).toString(), sender: 'chatgpt', text: responseText, mode, timestamp: new Date().toLocaleTimeString() });
+    saveSession(session);
+    broadcast({ type: 'STATUS', status: 'idle', sessionId: originSessionId });
+    res.json({ ok: true, response: responseText, sessionId: sid, provider });
+  } catch (err) {
+    console.error('[/api/ask error]', err);
+    broadcast({ type: 'STATUS', status: 'idle', sessionId: originSessionId });
+    res.json({ ok: false, error: err.message, sessionId: sid });
+  }
+});
 
 app.get('/api/subagents', (req, res) => res.json(subAgentManager.listAgents()));
 app.post('/api/subagents', (req, res) => {
