@@ -2,9 +2,9 @@
 >
 > **This repository is archived.** The **Vibe GPT Studio** desktop chat studio now
 > lives inside the
-> [`chatgpt-firefox-automation`](https://github.com/romangalaxys10-spec/chatgpt-firefox-automation)
+> [`web-ai-firefox-automation`](https://github.com/romangalaxys10-spec/web-ai-firefox-automation)
 > **monorepo**, at
-> [`vibe-gpt-studio/`](https://github.com/romangalaxys10-spec/chatgpt-firefox-automation/tree/main/vibe-gpt-studio).
+> [`vibe-gpt-studio/`](https://github.com/romangalaxys10-spec/web-ai-firefox-automation/tree/main/vibe-gpt-studio).
 >
 > That monorepo now contains: the **ChatGPT / Qwen / DeepSeek** automation
 > controllers, the **Desktop Chat Studio** app, and the **`/brainstorm-*` skills**
@@ -113,7 +113,7 @@ node -e "import('./qwen_service.js').then(m => new m.QwenAutomationController().
 
 ## 📦 Merged automation project
 
-The browser-automation core is merged as a git submodule at `automation/chatgpt-firefox-automation/`, sourced from [github.com/romangalaxys10-spec/chatgpt-firefox-automation](https://github.com/romangalaxys10-spec/chatgpt-firefox-automation) (Python + Playwright skill with CLI, tests, CI/CD). The JS services in this repo are the app-native implementations of the same automation; the submodule provides the standalone CLI / skill and keeps them in sync.
+The browser-automation core is merged as a git submodule at `automation/chatgpt-firefox-automation/`, sourced from [github.com/romangalaxys10-spec/web-ai-firefox-automation](https://github.com/romangalaxys10-spec/web-ai-firefox-automation) (Python + Playwright skill with CLI, tests, CI/CD). The JS services in this repo are the app-native implementations of the same automation; the submodule provides the standalone CLI / skill and keeps them in sync.
 
 ## 📄 License
 
