@@ -1,3 +1,17 @@
+> ## 🏠 Moved / Archived
+>
+> **This repository is archived.** The **Vibe GPT Studio** desktop chat studio now
+> lives inside the
+> [`chatgpt-firefox-automation`](https://github.com/romangalaxys10-spec/chatgpt-firefox-automation)
+> **monorepo**, at
+> [`vibe-gpt-studio/`](https://github.com/romangalaxys10-spec/chatgpt-firefox-automation/tree/main/vibe-gpt-studio).
+>
+> That monorepo now contains: the **ChatGPT / Qwen / DeepSeek** automation
+> controllers, the **Desktop Chat Studio** app, and the **`/brainstorm-*` skills**
+> for all three vendors. Please open issues/PRs there instead.
+>
+> ---
+
 # Vibe GPT Studio 🎨🤖
 
 > **v1.1.0** — fixes a truncated-HTML false-positive in the integrity verifier
